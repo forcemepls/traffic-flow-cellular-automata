@@ -39,7 +39,7 @@ class NagelSchreckenbergService
 
         for ($t = 0; $t < $iterations; $t++){
             
-            // Сортировка по месту в КА
+            // сортировка по месту в КА
             usort($currentMachines, function($a, $b) {
                 return $a['position'] <=> $b['position'];
             });

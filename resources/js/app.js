@@ -2,9 +2,10 @@ import './bootstrap';
 import Konva from 'konva';
 
 const container = document.getElementById('container');
+const carImageObj = new Image();
+carImageObj.src = '/images/car.png'; // Путь к файлу
 
 // --- НАСТРОЙКИ СЦЕНЫ ---
-// Начальные размеры (обновятся при нажатии кнопки)
 let stage = new Konva.Stage({
     container: 'container',
     width: container.offsetWidth,
@@ -27,11 +28,11 @@ let currentStep = 0;
 let playbackInterval = null;
 let isPlaying = false;
 let currentRoadLength = 0;
+let isTwoLanesMode = false; // Флаг для режима
 
 // --- МАТЕМАТИКА ---
 function getGeometry(roadLength) {
     let radius = (roadLength * fixedCellSize) / (2 * Math.PI);
-    // Центр рисуем в 0,0, так как саму сцену мы сдвинем в центр экрана
     return { radius, cx: 0, cy: 0 }; 
 }
 
@@ -57,49 +58,75 @@ stage.on('wheel', (e) => {
     stage.position(newPos);
 });
 
-// --- 1. ОТРИСОВКА СЕТКИ ---
-function drawGrid(roadLength) {
+// --- 1. ОТРИСОВКА ДОРОГИ (АСФАЛЬТ + РАЗМЕТКА) ---
+function drawGrid(roadLength, twoLanes) {
     gridGroup.destroyChildren(); 
     
     const { radius, cx, cy } = getGeometry(roadLength);
+    
+    // Параметры дороги
+    const laneWidth = fixedCellSize * 1.5; // Ширина одной полосы (чуть больше машины)
+    const lanesCount = twoLanes ? 2 : 1;
+    
+    // 1. Рисуем АСФАЛЬТ (Сплошное кольцо)
+    // Внутренний радиус: Базовый радиус минус половина ширины полосы
+    const innerRadius = radius - (laneWidth / 2);
+    // Внешний радиус: Внутренний + (количество полос * ширина)
+    const outerRadius = innerRadius + (lanesCount * laneWidth);
+
+    const asphalt = new Konva.Ring({
+        x: cx,
+        y: cy,
+        innerRadius: innerRadius,
+        outerRadius: outerRadius,
+        fill: '#333333', // Темно-серый асфальт
+        stroke: '#555',  // Бордюр
+        strokeWidth: 2,
+        shadowBlur: 10,
+        shadowColor: 'black',
+        shadowOpacity: 0.3
+    });
+    gridGroup.add(asphalt);
+
+    // 2. Рисуем ПУНКТИРНУЮ РАЗМЕТКУ (если 2 полосы)
+    if (twoLanes) {
+        // Линия проходит ровно между полосами
+        const separatorRadius = radius + (laneWidth / 2) + 2; // +2 небольшая поправка
+
+        const dashLine = new Konva.Circle({
+            x: cx,
+            y: cy,
+            radius: separatorRadius,
+            stroke: 'white',
+            strokeWidth: 2,
+            dash: [15, 15], // Длина штриха и пробела
+            opacity: 0.8
+        });
+        gridGroup.add(dashLine);
+    }
+
+    // 3. (Опционально) Цифры километров/ячеек
+    // Можно нарисовать их сбоку, чтобы не портить асфальт
     const angleStep = (2 * Math.PI) / roadLength; 
-
-    for (let i = 0; i < roadLength; i++) {
+    
+    // Рисуем метки каждые 10 клеток
+    for (let i = 0; i < roadLength; i += 5) {
         let angle = i * angleStep;
-        let x = cx + radius * Math.cos(angle);
-        let y = cy + radius * Math.sin(angle);
-
-        let rect = new Konva.Rect({
-            x: x,
-            y: y,
-            width: fixedCellSize,
-            height: fixedCellSize,
-            fill: 'white',
-            stroke: '#ccc',
-            strokeWidth: 1,
-            offset: { x: fixedCellSize / 2, y: fixedCellSize / 2 },
+        // Текст чуть внутри кольца
+        let textRadius = innerRadius - 20; 
+        let tx = cx + textRadius * Math.cos(angle);
+        let ty = cy + textRadius * Math.sin(angle);
+        
+        let text = new Konva.Text({
+            x: tx,
+            y: ty,
+            text: i.toString(),
+            fontSize: 10,
+            fill: 'gray',
+            offset: { x: 5, y: 5 },
             rotation: (angle * 180 / Math.PI) + 90,
         });
-
-        // Рисуем цифры реже, если дорога длинная
-        let textStep = roadLength > 50 ? 5 : 1;
-
-        if (i % textStep === 0) {
-            let textRadius = radius + fixedCellSize; 
-            let tx = cx + textRadius * Math.cos(angle);
-            let ty = cy + textRadius * Math.sin(angle);
-            
-            let text = new Konva.Text({
-                x: tx,
-                y: ty,
-                text: i.toString(),
-                fontSize: 12,
-                fill: 'gray',
-                offset: { x: 5, y: 5 }
-            });
-            gridGroup.add(text);
-        }
-        gridGroup.add(rect);
+        gridGroup.add(text);
     }
 }
 
@@ -117,34 +144,33 @@ function drawStep(stepIndex) {
     stepData.forEach(car => {
         let angle = car.position * angleStep;
         
-        let x = cx + radius * Math.cos(angle);
-        let y = cy + radius * Math.sin(angle);
+        // Определяем полосу (0 или 1)
+        let lane = car.lane || 0;
+        
+        // Считаем радиус для этой машины
+        let currentRadius = radius + (lane * fixedCellSize * 1.5);
 
-        let carRect = new Konva.Rect({
+        let x = cx + currentRadius * Math.cos(angle);
+        let y = cy + currentRadius * Math.sin(angle);
+
+        let carRect = new Konva.Image({
             x: x,
             y: y,
-            width: fixedCellSize - 4,
-            height: fixedCellSize - 8,
-            fill: '#ef4444', 
-            cornerRadius: 4,
-            shadowBlur: 2,
-            offset: { x: (fixedCellSize - 4) / 2, y: (fixedCellSize - 8) / 2 },
-            rotation: (angle * 180 / Math.PI) + 90,
-        });
-
-        let carText = new Konva.Text({
-            x: x,
-            y: y,
-            text: car.id,
-            fontSize: 12,
-            fontStyle: 'bold',
-            fill: 'white',
-            offset: { x: 3, y: 4 }, 
-            rotation: (angle * 180 / Math.PI) + 90,
+            image: carImageObj, // Передаем объект картинки
+            width: fixedCellSize, // Подгоняем размер под клетку
+            height: fixedCellSize / 2, // Пропорции машины (обычно 2:1)
+            
+            // ОЧЕНЬ ВАЖНО: Центрируем точку вращения
+            offset: { 
+                x: fixedCellSize / 2, 
+                y: (fixedCellSize / 2) / 2 
+            },
+            
+            // Поворот (тот же, что был)
+            rotation: (angle * 180 / Math.PI) + 90, 
         });
 
         carsGroup.add(carRect);
-        carsGroup.add(carText);
     });
     
     layer.draw();
@@ -158,29 +184,25 @@ const btnPlay = document.getElementById('btn-play');
 
 if (btnLoad) {
     btnLoad.addEventListener('click', () => {
+        const modeValue = document.getElementById('inp-mode').value;
         const payload = {
+            mode: modeValue,
             roadLength: parseInt(document.getElementById('inp-roadLength').value),
             numberCars: parseInt(document.getElementById('inp-numberCars').value),
             vMax: parseInt(document.getElementById('inp-vMax').value),
             iterations: parseInt(document.getElementById('inp-iterations').value),
         };
         currentRoadLength = payload.roadLength;
+        // Проверяем, расширенная ли это модель (для отрисовки второй полосы)
+        isTwoLanesMode = (modeValue === 'extendednagelschreckenberg');
 
-        // --- ВАЖНОЕ ИСПРАВЛЕНИЕ ЦЕНТРИРОВАНИЯ ---
-        // 1. Получаем актуальные размеры контейнера
+        // Центрирование
         const w = container.offsetWidth;
         const h = container.offsetHeight;
-        
-        // 2. Обновляем размер сцены
         stage.width(w);
         stage.height(h);
-        
-        // 3. Ставим позицию (0,0) сцены ровно в центр экрана
         stage.position({ x: w / 2, y: h / 2 });
-        
-        // 4. Сбрасываем зум на 1
         stage.scale({ x: 1, y: 1 });
-
 
         const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
 
@@ -199,7 +221,8 @@ if (btnLoad) {
             currentStep = 0;
             stopAutoPlay(); 
 
-            drawGrid(currentRoadLength);
+            // Рисуем сетку (1 или 2 полосы)
+            drawGrid(currentRoadLength, isTwoLanesMode);
             drawStep(0);
             
             btnPrev.disabled = false;
@@ -252,3 +275,50 @@ function stopAutoPlay() {
     btnPlay.classList.replace('bg-yellow-500', 'bg-green-500');
     btnPlay.classList.replace('hover:bg-yellow-600', 'hover:bg-green-600');
 }
+
+
+// --- ЛОГИКА БУРГЕР-МЕНЮ ---
+const menuDrawer = document.getElementById('menu-drawer');
+const menuBackdrop = document.getElementById('menu-backdrop');
+const btnOpenMenu = document.getElementById('btn-open-menu');
+const btnCloseMenu = document.getElementById('btn-close-menu');
+const modelButtons = document.querySelectorAll('.model-select-btn');
+const inputMode = document.getElementById('inp-mode');
+const currentModelLabel = document.getElementById('current-model-name');
+
+function openMenu() {
+    menuBackdrop.classList.remove('hidden');
+    menuDrawer.classList.remove('-translate-x-full');
+}
+
+function closeMenu() {
+    menuBackdrop.classList.add('hidden');
+    menuDrawer.classList.add('-translate-x-full');
+}
+
+if (btnOpenMenu) btnOpenMenu.addEventListener('click', openMenu);
+if (btnCloseMenu) btnCloseMenu.addEventListener('click', closeMenu);
+if (menuBackdrop) menuBackdrop.addEventListener('click', closeMenu);
+
+// Выбор модели из списка
+modelButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+        // 1. Получаем значение из data-value
+        const value = btn.dataset.value;
+        const name = btn.querySelector('h3').innerText;
+
+        // 2. Обновляем скрытый инпут и заголовок
+        inputMode.value = value;
+        currentModelLabel.innerText = name;
+
+        // 3. Выделяем активную кнопку (опционально, можно добавить стили)
+        modelButtons.forEach(b => b.classList.remove('border-blue-500', 'bg-blue-50'));
+        btn.classList.add('border-blue-500', 'bg-blue-50');
+
+        // 4. Закрываем меню
+        closeMenu();
+        
+        // 5. Опционально: можно сбрасывать сцену или сразу жать кнопку загрузки
+        // btnLoad.click(); 
+    });
+});

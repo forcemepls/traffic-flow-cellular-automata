@@ -1,12 +1,12 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\NagelController;
+use App\Http\Controllers\SimulationController;
 
 // Route::get('/', function () {
 //     return view('simulation');
 // });
 
-Route::get('/simulation_nagel', [NagelController::class, 'index']);
+Route::get('/simulation_nagel', [SimulationController::class, 'index']);
+Route::post('/simulation_nagel/calculate', [SimulationController::class, 'calculate']);
 
-Route::post('simulation_nagel/calculate', [NagelController::class, 'calculate']);

@@ -2,10 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\ExtendedNagelService;
 use Illuminate\Http\Request;
 use App\Services\NagelSchreckenbergService;
 
-class NagelController extends Controller
+class SimulationController extends Controller
 {
 
     public function index(){
@@ -18,19 +19,25 @@ class NagelController extends Controller
             'numberCars' => 'required|integer',
             'roadLength' => 'required|integer|min:4|max:200',
             'iterations' => 'required|integer',
-            'vMax'       => 'required|integer',
+            'vMax' => 'required|integer',
+            'mode' => 'required|string',
         ]);
 
-        $numberCars = $data['numberCars'];
         $roadLength = $data['roadLength'];
-        $iterations = $data['iterations'];
-        $vMax       = $data['vMax'];
 
-        $service = new NagelSchreckenbergService();
+        // выбор модели
+        if ($data['mode'] == 'nagelschreckenberg'){
+            $service = new NagelSchreckenbergService();
+            $isTwoLanes = false;
+        } else{
+            $service = new ExtendedNagelService();
+            $isTwoLanes = true;
+        }
 
+        // расстановка машин через шафл
         $positions = range(0, $roadLength - 1);
         shuffle($positions);
-        $selectedPositions = array_slice($positions, 0, $numberCars);
+        $selectedPositions = array_slice($positions, 0, $data['numberCars']);
 
         $machines = [];
         foreach ($selectedPositions as $i => $pos){
@@ -38,10 +45,12 @@ class NagelController extends Controller
                 'id' => $i,
                 'speed' => 0,
                 'position' => $pos,
+                //'lane' => $isTwoLanes ? rand(0, 1) : 0,
+                'lane' => 0,
             ];
         }
 
-        $history = $service->calculateStep($machines, $roadLength, $iterations, $vMax);
+        $history = $service->calculateStep($machines, $roadLength, $data['iterations'], $data['vMax']);
 
         return response()->json($history);
     }

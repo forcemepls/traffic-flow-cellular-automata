@@ -2,10 +2,8 @@ import './bootstrap';
 import Konva from 'konva';
 
 const container = document.getElementById('container');
-
-// 1. ЗАГРУЖАЕМ КАРТИНКУ
 const carImageObj = new Image();
-carImageObj.src = '/images/car.png'; 
+carImageObj.src = '/images/car.png'; // Путь к файлу
 
 // --- НАСТРОЙКИ СЦЕНЫ ---
 let stage = new Konva.Stage({
@@ -27,15 +25,10 @@ layer.add(carsGroup);
 const fixedCellSize = 30; 
 let simulationHistory = [];
 let currentStep = 0;
-let currentRoadLength = 0;
-let isTwoLanesMode = false;
-
-// ПЕРЕМЕННЫЕ АНИМАЦИИ
+let playbackInterval = null;
 let isPlaying = false;
-let animationRequestId = null;
-let lastFrameTime = 0;
-let currentProgress = 0; // от 0.0 до 1.0 (внутри одного шага)
-const STEP_DURATION = 1000; // Длительность одного хода в мс (1 секунда для красоты)
+let currentRoadLength = 0;
+let isTwoLanesMode = false; // Флаг для режима
 
 // --- МАТЕМАТИКА ---
 function getGeometry(roadLength) {
@@ -49,12 +42,15 @@ stage.on('wheel', (e) => {
     e.evt.preventDefault();
     var oldScale = stage.scaleX();
     var pointer = stage.getPointerPosition();
+
     var mousePointTo = {
         x: (pointer.x - stage.x()) / oldScale,
         y: (pointer.y - stage.y()) / oldScale,
     };
+
     var newScale = e.evt.deltaY > 0 ? oldScale / scaleBy : oldScale * scaleBy;
     stage.scale({ x: newScale, y: newScale });
+
     var newPos = {
         x: pointer.x - mousePointTo.x * newScale,
         y: pointer.y - mousePointTo.y * newScale,
@@ -62,13 +58,20 @@ stage.on('wheel', (e) => {
     stage.position(newPos);
 });
 
-// --- 1. ОТРИСОВКА ДОРОГИ ---
+// --- 1. ОТРИСОВКА ДОРОГИ (АСФАЛЬТ + РАЗМЕТКА) ---
 function drawGrid(roadLength, twoLanes) {
     gridGroup.destroyChildren(); 
+    
     const { radius, cx, cy } = getGeometry(roadLength);
-    const laneWidth = fixedCellSize * 1.5; 
+    
+    // Параметры дороги
+    const laneWidth = fixedCellSize * 1.5; // Ширина одной полосы (чуть больше машины)
     const lanesCount = twoLanes ? 2 : 1;
+    
+    // 1. Рисуем АСФАЛЬТ (Сплошное кольцо)
+    // Внутренний радиус: Базовый радиус минус половина ширины полосы
     const innerRadius = radius - (laneWidth / 2);
+    // Внешний радиус: Внутренний + (количество полос * ширина)
     const outerRadius = innerRadius + (lanesCount * laneWidth);
 
     const asphalt = new Konva.Ring({
@@ -76,8 +79,8 @@ function drawGrid(roadLength, twoLanes) {
         y: cy,
         innerRadius: innerRadius,
         outerRadius: outerRadius,
-        fill: '#333333',
-        stroke: '#555',
+        fill: '#333333', // Темно-серый асфальт
+        stroke: '#555',  // Бордюр
         strokeWidth: 2,
         shadowBlur: 10,
         shadowColor: 'black',
@@ -85,165 +88,95 @@ function drawGrid(roadLength, twoLanes) {
     });
     gridGroup.add(asphalt);
 
+    // 2. Рисуем ПУНКТИРНУЮ РАЗМЕТКУ (если 2 полосы)
     if (twoLanes) {
-        const separatorRadius = radius + (laneWidth / 2) + 2;
+        // Линия проходит ровно между полосами
+        const separatorRadius = radius + (laneWidth / 2) + 2; // +2 небольшая поправка
+
         const dashLine = new Konva.Circle({
             x: cx,
             y: cy,
             radius: separatorRadius,
             stroke: 'white',
             strokeWidth: 2,
-            dash: [15, 15],
+            dash: [15, 15], // Длина штриха и пробела
             opacity: 0.8
         });
         gridGroup.add(dashLine);
     }
 
+    // 3. (Опционально) Цифры километров/ячеек
+    // Можно нарисовать их сбоку, чтобы не портить асфальт
     const angleStep = (2 * Math.PI) / roadLength; 
+    
+    // Рисуем метки каждые 10 клеток
     for (let i = 0; i < roadLength; i += 5) {
         let angle = i * angleStep;
+        // Текст чуть внутри кольца
         let textRadius = innerRadius - 20; 
         let tx = cx + textRadius * Math.cos(angle);
         let ty = cy + textRadius * Math.sin(angle);
+        
         let text = new Konva.Text({
-            x: tx, y: ty, text: i.toString(), fontSize: 10, fill: 'gray',
-            offset: { x: 5, y: 5 }, rotation: (angle * 180 / Math.PI) + 90,
+            x: tx,
+            y: ty,
+            text: i.toString(),
+            fontSize: 10,
+            fill: 'gray',
+            offset: { x: 5, y: 5 },
+            rotation: (angle * 180 / Math.PI) + 90,
         });
         gridGroup.add(text);
     }
 }
 
-// --- 2. ОТРИСОВКА МАШИН (ИНТЕРПОЛЯЦИЯ) ---
-function drawInterpolated(stepIndex, progress) {
+// --- 2. ОТРИСОВКА МАШИН ---
+function drawStep(stepIndex) {
     if (!simulationHistory[stepIndex]) return;
     document.getElementById('step-counter').innerText = stepIndex;
 
-    // Если конец истории, рисуем статично
-    if (!simulationHistory[stepIndex + 1]) {
-        drawStatic(stepIndex);
-        return;
-    }
-
-    carsGroup.destroyChildren();
-
-    const currentData = simulationHistory[stepIndex];
-    const nextData = simulationHistory[stepIndex + 1];
-    const nextDataMap = new Map(nextData.map(c => [c.id, c]));
-
+    carsGroup.destroyChildren(); 
+    
+    const stepData = simulationHistory[stepIndex];
     const { radius, cx, cy } = getGeometry(currentRoadLength);
     const angleStep = (2 * Math.PI) / currentRoadLength;
 
-    currentData.forEach(car => {
-        const nextCar = nextDataMap.get(car.id);
+    stepData.forEach(car => {
+        let angle = car.position * angleStep;
         
-        // Значения по умолчанию (если машина стоит)
-        let interpPos = car.position;
-        let interpLane = car.lane || 0;
-        let rotationAngle = 0; // Будем считать ниже
+        // Определяем полосу (0 или 1)
+        let lane = car.lane || 0;
+        
+        // Считаем радиус для этой машины
+        let currentRadius = radius + (lane * fixedCellSize * 1.5);
 
-        if (nextCar) {
-            // 1. Позиция (Кольцо)
-            let startPos = car.position;
-            let endPos = nextCar.position;
-            let delta = endPos - startPos;
-            if (delta < 0) delta += currentRoadLength;
+        let x = cx + currentRadius * Math.cos(angle);
+        let y = cy + currentRadius * Math.sin(angle);
+
+        let carRect = new Konva.Image({
+            x: x,
+            y: y,
+            image: carImageObj, // Передаем объект картинки
+            width: fixedCellSize, // Подгоняем размер под клетку
+            height: fixedCellSize / 2, // Пропорции машины (обычно 2:1)
             
-            interpPos = startPos + (delta * progress);
-
-            // 2. Полоса
-            let startLane = car.lane || 0;
-            let endLane = nextCar.lane || 0;
-            interpLane = startLane + (endLane - startLane) * progress;
-
-            // 3. Расчет угла поворота (Векторный метод)
-            // Считаем координаты СЕЙЧАС
-            let angNow = interpPos * angleStep;
-            let radNow = radius + (interpLane * fixedCellSize * 1.5);
-            let xNow = cx + radNow * Math.cos(angNow);
-            let yNow = cy + radNow * Math.sin(angNow);
-
-            // Считаем координаты ЧУТЬ ПОЗЖЕ (через 0.01 шага)
-            // Это нужно, чтобы понять, куда смотрит нос машины
-            let pFuture = progress + 0.01;
-            let iPosF = startPos + (delta * pFuture);
-            let iLaneF = startLane + (endLane - startLane) * pFuture;
+            // ОЧЕНЬ ВАЖНО: Центрируем точку вращения
+            offset: { 
+                x: fixedCellSize / 2, 
+                y: (fixedCellSize / 2) / 2 
+            },
             
-            let angF = iPosF * angleStep;
-            let radF = radius + (iLaneF * fixedCellSize * 1.5);
-            let xF = cx + radF * Math.cos(angF);
-            let yF = cy + radF * Math.sin(angF);
+            // Поворот (тот же, что был)
+            rotation: (angle * 180 / Math.PI) + 90, 
+        });
 
-            // Если машина движется (координаты изменились)
-            if (Math.abs(xF - xNow) > 0.001 || Math.abs(yF - yNow) > 0.001) {
-                const dx = xF - xNow;
-                const dy = yF - yNow;
-                rotationAngle = Math.atan2(dy, dx) * 180 / Math.PI;
-            } else {
-                // Машина стоит - смотрит по касательной
-                rotationAngle = (angNow * 180 / Math.PI) + 90;
-            }
-
-            // Создаем картинку
-            let carNode = new Konva.Image({
-                x: xNow,
-                y: yNow,
-                image: carImageObj, 
-                width: fixedCellSize, 
-                height: fixedCellSize / 2, 
-                offset: { x: fixedCellSize / 2, y: (fixedCellSize / 2) / 2 },
-                rotation: rotationAngle, 
-            });
-            carsGroup.add(carNode);
-
-        } else {
-            // Если nextCar не найден (редкий случай), рисуем статично
-            // (можно пропустить или нарисовать серым)
-        }
+        carsGroup.add(carRect);
     });
-
+    
     layer.draw();
 }
 
-// Статическая отрисовка (для кнопок и конца анимации)
-function drawStatic(stepIndex) {
-    // Рисуем кадр с прогрессом 0 (начало шага)
-    drawInterpolated(stepIndex, 0);
-}
-
-
-// --- 3. ИГРОВОЙ ЦИКЛ (LOOP) ---
-function gameLoop(timestamp) {
-    if (!isPlaying) return;
-    if (!lastFrameTime) lastFrameTime = timestamp;
-
-    const deltaTime = timestamp - lastFrameTime;
-    lastFrameTime = timestamp;
-
-    // Увеличиваем прогресс внутри текущего шага
-    currentProgress += deltaTime / STEP_DURATION;
-
-    if (currentProgress >= 1) {
-        // Шаг закончился, переходим к следующему
-        currentStep++;
-        currentProgress = 0; // Сброс прогресса
-
-        // Если дошли до конца истории
-        if (currentStep >= simulationHistory.length - 1) {
-            stopAutoPlay();
-            drawStatic(simulationHistory.length - 1);
-            return;
-        }
-    }
-
-    // Рисуем промежуточный кадр
-    drawInterpolated(currentStep, currentProgress);
-
-    // Планируем следующий кадр
-    animationRequestId = requestAnimationFrame(gameLoop);
-}
-
-
-// --- 4. УПРАВЛЕНИЕ ---
+// --- 3. ЛОГИКА ---
 const btnLoad = document.getElementById('btn-load');
 const btnPrev = document.getElementById('btn-prev');
 const btnNext = document.getElementById('btn-next');
@@ -260,6 +193,7 @@ if (btnLoad) {
             iterations: parseInt(document.getElementById('inp-iterations').value),
         };
         currentRoadLength = payload.roadLength;
+        // Проверяем, расширенная ли это модель (для отрисовки второй полосы)
         isTwoLanesMode = (modeValue === 'extendednagelschreckenberg');
 
         // Центрирование
@@ -285,11 +219,11 @@ if (btnLoad) {
         .then(data => {
             simulationHistory = data;
             currentStep = 0;
-            currentProgress = 0;
             stopAutoPlay(); 
 
+            // Рисуем сетку (1 или 2 полосы)
             drawGrid(currentRoadLength, isTwoLanesMode);
-            drawStatic(0);
+            drawStep(0);
             
             btnPrev.disabled = false;
             btnNext.disabled = false;
@@ -302,14 +236,14 @@ if (btnLoad) {
 btnNext.addEventListener('click', () => {
     if (currentStep < simulationHistory.length - 1) {
         currentStep++;
-        drawStatic(currentStep);
+        drawStep(currentStep);
     }
 });
 
 btnPrev.addEventListener('click', () => {
     if (currentStep > 0) {
         currentStep--;
-        drawStatic(currentStep);
+        drawStep(currentStep);
     }
 });
 
@@ -319,32 +253,31 @@ btnPlay.addEventListener('click', () => {
 });
 
 function startAutoPlay() {
-    if (currentStep >= simulationHistory.length - 1) {
-        currentStep = 0; // Начинаем сначала
-    }
-
     isPlaying = true;
     btnPlay.innerText = "⏸ Пауза";
     btnPlay.classList.replace('bg-green-500', 'bg-yellow-500'); 
     btnPlay.classList.replace('hover:bg-green-600', 'hover:bg-yellow-600');
 
-    lastFrameTime = 0;
-    currentProgress = 0;
-    animationRequestId = requestAnimationFrame(gameLoop);
+    playbackInterval = setInterval(() => {
+        if (currentStep >= simulationHistory.length - 1) {
+            stopAutoPlay();
+            return;
+        }
+        currentStep++;
+        drawStep(currentStep);
+    }, 500); 
 }
 
 function stopAutoPlay() {
     isPlaying = false;
-    cancelAnimationFrame(animationRequestId);
+    clearInterval(playbackInterval);
     btnPlay.innerText = "▶ Автовоспроизведение";
     btnPlay.classList.replace('bg-yellow-500', 'bg-green-500');
     btnPlay.classList.replace('hover:bg-yellow-600', 'hover:bg-green-600');
-    
-    // При паузе рисуем статичный кадр (без интерполяции)
-    drawStatic(currentStep);
 }
 
-// --- БУРГЕР-МЕНЮ ---
+
+// --- ЛОГИКА БУРГЕР-МЕНЮ ---
 const menuDrawer = document.getElementById('menu-drawer');
 const menuBackdrop = document.getElementById('menu-backdrop');
 const btnOpenMenu = document.getElementById('btn-open-menu');
@@ -367,14 +300,25 @@ if (btnOpenMenu) btnOpenMenu.addEventListener('click', openMenu);
 if (btnCloseMenu) btnCloseMenu.addEventListener('click', closeMenu);
 if (menuBackdrop) menuBackdrop.addEventListener('click', closeMenu);
 
+// Выбор модели из списка
 modelButtons.forEach(btn => {
     btn.addEventListener('click', () => {
+        // 1. Получаем значение из data-value
         const value = btn.dataset.value;
         const name = btn.querySelector('h3').innerText;
+
+        // 2. Обновляем скрытый инпут и заголовок
         inputMode.value = value;
         currentModelLabel.innerText = name;
+
+        // 3. Выделяем активную кнопку (опционально, можно добавить стили)
         modelButtons.forEach(b => b.classList.remove('border-blue-500', 'bg-blue-50'));
         btn.classList.add('border-blue-500', 'bg-blue-50');
+
+        // 4. Закрываем меню
         closeMenu();
+        
+        // 5. Опционально: можно сбрасывать сцену или сразу жать кнопку загрузки
+        // btnLoad.click(); 
     });
 });

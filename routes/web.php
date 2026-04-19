@@ -3,10 +3,11 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\SimulationController;
 
-// Route::get('/', function () {
-//     return view('simulation');
-// });
+Route::get('/', function () {
+    return view('welcome');
+});
 
-Route::get('/simulation_nagel', [SimulationController::class, 'index']);
-Route::post('/simulation_nagel/calculate', [SimulationController::class, 'calculate']);
+Route::get('/simulation_nagel', [SimulationController::class, 'indexBasic']);
+Route::get('/extended_simulation_nagel', [SimulationController::class, 'indexExtended']);
 
+Route::post('/api/calculate', [SimulationController::class, 'calculate']);

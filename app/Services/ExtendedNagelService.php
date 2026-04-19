@@ -4,89 +4,111 @@ namespace App\Services;
 
 class ExtendedNagelService extends NagelSchreckenbergService
 {
-    // поиск дистанции с учетом полосы
+    /**
+     * Поиск дистанции (gap) до ближайшей машины в целевой полосе.
+     * Возвращает количество ПУСТЫХ клеток.
+     */
     private function getGapToCar($machine, $allMachines, $roadLength, $targetLane, $lookBack = false) {
-        $minDist = $roadLength;
+        $minGap = $roadLength; // Начинаем с макс возможной дистанции
 
         foreach ($allMachines as $other) {
+            // Пропускаем себя и машины в других полосах
             if ($other['id'] === $machine['id']) continue;
             if ($other['lane'] !== $targetLane) continue;
 
-            $d = $roadLength;
-
-            if (!$lookBack) { // Вперед
-                if ($other['position'] > $machine['position']) {
-                    $d = $other['position'] - $machine['position'] - 1;
-                } else {
-                    $d = ($roadLength - $machine['position']) + $other['position'] - 1;
-                }
-            } else { // Назад
-                if ($machine['position'] > $other['position']) {
-                    $d = $machine['position'] - $other['position'] - 1;
-                } else {
-                    $d = ($roadLength - $other['position']) + $machine['position'] - 1;
-                }
+            // Расчет "сырой" дистанции в клетках
+            if (!$lookBack) {
+                // Дистанция ВПЕРЕД от нас до соседа
+                // Формула (other - self + L) % L дает расстояние по кругу всегда вперед
+                $dist = ($other['position'] - $machine['position'] + $roadLength) % $roadLength;
+            } else {
+                // Дистанция НАЗАД от нас до соседа (или от соседа до нас вперед)
+                // Формула (self - other + L) % L
+                $dist = ($machine['position'] - $other['position'] + $roadLength) % $roadLength;
             }
 
-            if ($d < $minDist) $minDist = $d;
+            // ВАЖНОЕ ИСПРАВЛЕНИЕ:
+            // Если dist == 0, значит машины в одной клетке.
+            // Gap должен быть -1 (авария/занято), чтобы запретить движение.
+            if ($dist === 0) {
+                return -1; 
+            }
+
+            // Количество пустых клеток = дистанция - 1
+            // (если дистанция 1, то пустых клеток 0)
+            $gap = $dist - 1;
+
+            if ($gap < $minGap) {
+                $minGap = $gap;
+            }
         }
-        return $minDist;
+        
+        return $minGap;
     }
 
     private function changeLanes(array $machines, int $roadLength, int $vMax): array
     {
+        // Используем копию для синхронного обновления
         $snapshot = $machines; 
         
         foreach ($machines as &$car) {
             $myLane = $car['lane'];
             $v = $car['speed'];
 
-            // Дистанция впереди в СВОЕЙ полосе
+            // 1. Считаем GAP в своей полосе (впереди)
             $gapHere = $this->getGapToCar($car, $snapshot, $roadLength, $myLane);
 
             if ($myLane === 0) {
-                // --- ЛОГИКА ДЛЯ ОСНОВНОЙ ПОЛОСЫ (0) ---
-                // Хотим обогнать, если уперлись в машину спереди
+                // --- (0) ОСНОВНАЯ ПОЛОСА -> ХОТИМ В ОБГОН (1) ---
+                
+                // Мотивация: уперлись в машину (gap < v + 1)
                 $blocked = $gapHere < ($v + 1);
 
                 if ($blocked) {
-                    // Проверяем полосу обгона (1)
+                    // Проверяем полосу обгона
                     $gapOtherForward = $this->getGapToCar($car, $snapshot, $roadLength, 1);
                     $gapOtherBack = $this->getGapToCar($car, $snapshot, $roadLength, 1, true);
 
-                    // Условия обгона:
-                    // 1. В соседней полосе места больше, чем здесь (есть смысл рыпаться)
+                    // Условия:
+                    // 1. Там свободнее (места больше)
                     $nice = $gapOtherForward > $gapHere;
-                    // 2. Сзади на соседней полосе безопасно (не подрежем)
-                    $safe = $gapOtherBack > $vMax;
+                    
+                    // 2. Безопасно сзади (Lgap_back >= v_max_other). 
+                    // Обычно берут vMax, чтобы быстрый "гонщик" не влетел.
+                    $safeBack = $gapOtherBack >= $vMax;
 
-                    if ($nice && $safe) {
-                        $car['lane'] = 1; // Уходим на обгон
+                    // 3. Безопасно спереди (не прыгаем в занятую клетку)
+                    // Gap должен быть >= 0 (то есть dist >= 1)
+                    $safeForward = $gapOtherForward >= 0;
+
+                    if ($nice && $safeBack && $safeForward) {
+                        $car['lane'] = 1;
                     }
                 }
 
             } else {
-                // --- ЛОГИКА ДЛЯ ПОЛОСЫ ОБГОНА (1) ---
-                // Пытаемся вернуться назад в полосу 0 (Keep Right rule)
+                // --- (1) ПОЛОСА ОБГОНА -> ХОТИМ ОБРАТНО (0) ---
                 
                 $gapRightForward = $this->getGapToCar($car, $snapshot, $roadLength, 0);
                 $gapRightBack = $this->getGapToCar($car, $snapshot, $roadLength, 0, true);
 
                 // Условия возврата:
-                // 1. Справа безопасно сзади (не подрежем того, кого обогнали)
-                $safeBack = $gapRightBack > $vMax;
-                // 2. Справа достаточно места спереди (не прыгнем сразу в бампер другой машине)
-                $safeForward = $gapRightForward >= ($v + 1);
+                // 1. Безопасно сзади
+                $safeBack = $gapRightBack >= $vMax;
+                
+                // 2. Безопасно спереди (достаточно места для текущей скорости)
+                // В оригинальной STCA правилах: мы возвращаемся, если не придется сразу тормозить
+                // То есть gap >= v
+                $safeForward = $gapRightForward >= $v; 
 
                 if ($safeBack && $safeForward) {
-                    $car['lane'] = 0; // Возвращаемся в ряд
+                    $car['lane'] = 0; 
                 }
             }
         }
         return $machines;
     }
 
-    // ПЕРЕОПРЕДЕЛЯЕМ ГЛАВНЫЙ МЕТОД
     public function calculateStep(array $initialState, int $roadLength, int $iterations, int $vMax): array
     {
         $history = [];
@@ -97,16 +119,17 @@ class ExtendedNagelService extends NagelSchreckenbergService
             // 1. Смена полосы
             $currentMachines = $this->changeLanes($currentMachines, $roadLength, $vMax);
 
-            // 2. Расчет скорости
+            // 2. Расчет скорости и движения
             $nextMachinesState = [];
-            $snapshot = $currentMachines;
+            $snapshot = $currentMachines; // Снимок уже с новыми полосами
 
             foreach ($currentMachines as $machine) {
                 $v = $machine['speed'];
-                // Gap ищем только в СВОЕЙ полосе
+                
+                // Gap в (возможно новой) полосе
                 $gap = $this->getGapToCar($machine, $snapshot, $roadLength, $machine['lane']);
 
-                // Методы родителя
+                // Стандартная физика
                 $v = $this->speedup($v, $vMax);
                 $v = $this->slowdown($v, $gap);
                 $v = $this->random($v, 0.3);
@@ -119,7 +142,7 @@ class ExtendedNagelService extends NagelSchreckenbergService
                 ];
             }
 
-            // 3. Движение
+            // 3. Физическое перемещение
             foreach ($nextMachinesState as &$m) {
                 $m['position'] = $this->move($m['position'], $m['speed'], $roadLength);
             }

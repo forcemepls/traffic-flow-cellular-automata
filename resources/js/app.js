@@ -350,16 +350,41 @@ const btnNext = document.getElementById('btn-next');
 const btnPlay = document.getElementById('btn-play');
 const btnStatistics = document.getElementById('btn-statistics');
 
+// Показ/скрытие поля p_change в зависимости от режима
+const modeInput = document.getElementById('inp-mode');
+const grpPchange = document.getElementById('grp-pchange');
+
+function toggleTwoLaneFields() {
+    if (!grpPchange || !modeInput) return;
+    const isExtended = modeInput.value === 'extendednagelschreckenberg';
+    if (isExtended) {
+        grpPchange.classList.remove('hidden');
+    } else {
+        grpPchange.classList.add('hidden');
+    }
+}
+
+// Вызов при загрузке страницы — режим уже установлен сервером в inp-mode
+toggleTwoLaneFields();
+
 if (btnLoad) {
     btnLoad.addEventListener('click', () => {
         const modeValue = document.getElementById('inp-mode').value;
+
         const payload = {
-            mode: modeValue,
-            roadLength: parseInt(document.getElementById('inp-roadLength').value),
-            numberCars: parseInt(document.getElementById('inp-numberCars').value),
-            vMax: parseInt(document.getElementById('inp-vMax').value),
-            iterations: parseInt(document.getElementById('inp-iterations').value),
+            mode:       modeValue,
+            roadLength: parseInt(document.getElementById('inp-roadLength').value, 10),
+            numberCars: parseInt(document.getElementById('inp-numberCars').value, 10),
+            vMax:       parseInt(document.getElementById('inp-vMax').value, 10),
+            iterations: parseInt(document.getElementById('inp-iterations').value, 10),
+            p:          parseFloat(document.getElementById('inp-p').value) || 0.3,
         };
+
+        // Для двухполосной модели добавляем вероятность перестроения
+        if (modeValue === 'extendednagelschreckenberg') {
+            payload.pChange = parseFloat(document.getElementById('inp-pchange').value) || 1.0;
+        }
+
         currentRoadLength = payload.roadLength;
         isTwoLanesMode = (modeValue === 'extendednagelschreckenberg');
 

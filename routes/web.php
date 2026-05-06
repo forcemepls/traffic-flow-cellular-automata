@@ -9,5 +9,6 @@ Route::get('/', function () {
 
 Route::get('/simulation_nagel', [SimulationController::class, 'indexBasic']);
 Route::get('/extended_simulation_nagel', [SimulationController::class, 'indexExtended']);
+Route::get('/t_junction', [SimulationController::class, 'indexTJunction']);
 
 Route::post('/api/calculate', [SimulationController::class, 'calculate']);

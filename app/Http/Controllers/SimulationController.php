@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use App\Services\ExtendedNagelService;
 use App\Services\NagelSchreckenbergService;
 use App\Services\StatisticsService;
+use App\Services\TJunctionService;
 
 class SimulationController extends Controller
 {
@@ -23,46 +24,91 @@ class SimulationController extends Controller
         ]);
     }
 
+    public function indexTJunction()
+    {
+        return view('simulation_t_junction', [
+            'title' => 'T-образный перекрёсток'
+        ]);
+    }
+
     public function calculate(Request $request)
     {
-        $data = $request->validate([
-            'numberCars' => 'required|integer|min:1',
+        // Базовая валидация — общие поля для всех режимов
+        $base = $request->validate([
+            'mode'       => 'required|string|in:nagelschreckenberg,extendednagelschreckenberg,tjunction',
             'roadLength' => 'required|integer|min:4|max:200',
             'iterations' => 'required|integer|min:1|max:5000',
             'vMax'       => 'required|integer|min:1|max:10',
-            'mode'       => 'required|string|in:nagelschreckenberg,extendednagelschreckenberg',
             'p'          => 'nullable|numeric|min:0|max:1',
+        ]);
+
+        $roadLength = $base['roadLength'];
+        $vMax       = $base['vMax'];
+        $p          = $base['p'] ?? 0.3;
+
+        // -------------------------------------------------------
+        // Режим T-образного перекрёстка
+        // -------------------------------------------------------
+        if ($base['mode'] === 'tjunction') {
+
+            $data = $request->validate([
+                'tPhaseMain' => 'required|integer|min:5|max:300',
+                'tPhaseSec'  => 'required|integer|min:5|max:300',
+                'lambdaW'    => 'required|numeric|min:0|max:120',
+                'lambdaE'    => 'required|numeric|min:0|max:120',
+                'lambdaS'    => 'required|numeric|min:0|max:120',
+            ]);
+
+            $service = new TJunctionService();
+            $history = $service->calculateStep(
+                $roadLength,
+                $base['iterations'],
+                $vMax,
+                $p,
+                $data['tPhaseMain'],
+                $data['tPhaseSec'],
+                $data['lambdaW'],
+                $data['lambdaE'],
+                $data['lambdaS']
+            );
+
+            return response()->json([
+                'history'    => $history,
+                'statistics' => [], // заглушка — статистика будет на Шаге 7
+            ]);
+        }
+
+        // -------------------------------------------------------
+        // Кольцевые модели — общие параметры
+        // -------------------------------------------------------
+        $ringData = $request->validate([
+            'numberCars' => 'required|integer|min:1',
             'pChange'    => 'nullable|numeric|min:0|max:1',
         ]);
 
-        $roadLength = $data['roadLength'];
-        $vMax       = $data['vMax'];
-        $p          = $data['p']       ?? 0.3;
-        $pChange    = $data['pChange'] ?? 1.0;
-
-        $isTwoLanes = $data['mode'] === 'extendednagelschreckenberg';
+        $pChange    = $ringData['pChange'] ?? 1.0;
+        $isTwoLanes = $base['mode'] === 'extendednagelschreckenberg';
         $laneCount  = $isTwoLanes ? 2 : 1;
 
-        // Проверка влезут ли машины (более дружественно к пользователю, чем просто min)
-        if ($data['numberCars'] > $roadLength * $laneCount) {
+        if ($ringData['numberCars'] > $roadLength * $laneCount) {
             return response()->json([
                 'message' => 'Слишком много машин для такой дороги.',
                 'errors'  => [
-                    'numberCars' => ['Максимум ' . ($roadLength * $laneCount) . ' машин для этой конфигурации.']
+                    'numberCars' => [
+                        'Максимум ' . ($roadLength * $laneCount) . ' машин для этой конфигурации.'
+                    ],
                 ],
             ], 422);
         }
 
-        // Расстановка
-        $machines = $this->placeCars($data['numberCars'], $roadLength, $laneCount);
+        $machines = $this->placeCars($ringData['numberCars'], $roadLength, $laneCount);
 
-        // Расчёт
         if ($isTwoLanes) {
             $service = new ExtendedNagelService();
-            $history = $service->calculateStep($machines, $roadLength, $data['iterations'], $vMax, $p, $pChange);
+            $history = $service->calculateStep($machines, $roadLength, $base['iterations'], $vMax, $p, $pChange);
         } else {
             $service = new NagelSchreckenbergService();
-            $history = $service->calculateStep($machines, $roadLength, $data['iterations'], $vMax, $p);
+            $history = $service->calculateStep($machines, $roadLength, $base['iterations'], $vMax, $p);
         }
 
         $statistics = (new StatisticsService())

@@ -4,9 +4,9 @@ namespace App\Services;
 
 class ExtendedNagelService extends NagelSchreckenbergService
 {
-    /**
-     * Построить индекс [lane][position] => car для O(1) поиска.
-     */
+    // NaSchRulesTrait уже подключен через родительский класс —
+    // speedup/slowdown/random/move доступны напрямую
+
     private function buildGrid(array $machines, int $roadLength): array
     {
         $grid = [0 => [], 1 => []];
@@ -16,40 +16,26 @@ class ExtendedNagelService extends NagelSchreckenbergService
         return $grid;
     }
 
-    /**
-     * Gap вперёд в целевой полосе, считая от позиции $pos.
-     * Возвращает число ПУСТЫХ клеток до ближайшей машины впереди.
-     * Если клетка под собой занята (одновременно существуют две машины в одной клетке) — вернёт 0.
-     */
-    private function gapForward(array $grid, int $targetLane, int $pos, int $roadLength): int
+    private function gapForward(array $grid, int $lane, int $pos, int $roadLength): int
     {
         for ($i = 1; $i <= $roadLength; $i++) {
-            $cell = ($pos + $i) % $roadLength;
-            if (isset($grid[$targetLane][$cell])) {
-                return $i - 1;
-            }
-        }
-        return $roadLength; // полоса пуста
-    }
-
-    /**
-     * Gap назад: расстояние от ближайшей машины сзади до позиции $pos (в пустых клетках).
-     */
-    private function gapBackward(array $grid, int $targetLane, int $pos, int $roadLength): int
-    {
-        for ($i = 1; $i <= $roadLength; $i++) {
-            $cell = ($pos - $i + $roadLength) % $roadLength;
-            if (isset($grid[$targetLane][$cell])) {
+            if (isset($grid[$lane][($pos + $i) % $roadLength])) {
                 return $i - 1;
             }
         }
         return $roadLength;
     }
 
-    /**
-     * Этап 1: сбор намерений о смене полосы.
-     * Возвращает массив [carId => targetLane] только для тех, кто хочет перестроиться.
-     */
+    private function gapBackward(array $grid, int $lane, int $pos, int $roadLength): int
+    {
+        for ($i = 1; $i <= $roadLength; $i++) {
+            if (isset($grid[$lane][($pos - $i + $roadLength) % $roadLength])) {
+                return $i - 1;
+            }
+        }
+        return $roadLength;
+    }
+
     private function collectLaneChangeIntents(
         array $machines,
         array $grid,
@@ -65,18 +51,14 @@ class ExtendedNagelService extends NagelSchreckenbergService
             $pos       = $car['position'];
             $v         = $car['speed'];
 
-            $gapHere        = $this->gapForward($grid, $myLane, $pos, $roadLength);
-            $gapOtherFwd    = $this->gapForward($grid, $otherLane, $pos, $roadLength);
-            $gapOtherBack   = $this->gapBackward($grid, $otherLane, $pos, $roadLength);
+            $gapHere      = $this->gapForward($grid, $myLane,    $pos, $roadLength);
+            $gapOtherFwd  = $this->gapForward($grid, $otherLane, $pos, $roadLength);
+            $gapOtherBack = $this->gapBackward($grid, $otherLane, $pos, $roadLength);
 
             if ($myLane === 0) {
-                // Мотивация: уперлись или уперёмся
                 $motivation = $gapHere < min($v + 1, $vMax);
-                // Соседняя полоса свободнее
                 $incentive  = $gapOtherFwd > $gapHere;
-                // Безопасно сзади (не влетит быстрый сосед)
                 $safeBack   = $gapOtherBack >= $vMax;
-                // Целевая клетка свободна
                 $cellFree   = !isset($grid[$otherLane][$pos]);
 
                 if ($motivation && $incentive && $safeBack && $cellFree) {
@@ -85,7 +67,6 @@ class ExtendedNagelService extends NagelSchreckenbergService
                     }
                 }
             } else {
-                // Возврат в правую: стандартное правило STCA — хватит места для текущей v
                 $safeBack = $gapOtherBack >= $vMax;
                 $safeFwd  = $gapOtherFwd >= $v;
                 $cellFree = !isset($grid[$otherLane][$pos]);
@@ -101,13 +82,8 @@ class ExtendedNagelService extends NagelSchreckenbergService
         return $intents;
     }
 
-    /**
-     * Этап 2: разрешение конфликтов — если двое целятся в одну клетку полосы, оба остаются.
-     * (Альтернатива: случайно выбрать одного. Я реализую консервативный вариант — оба откат.)
-     */
     private function resolveConflicts(array $machines, array $intents): array
     {
-        // targetCells[lane][pos] = [carId, carId, ...]
         $targetCells = [];
         foreach ($machines as $car) {
             $id = $car['id'];
@@ -116,7 +92,6 @@ class ExtendedNagelService extends NagelSchreckenbergService
             $targetCells[$targetLane][$car['position']][] = $id;
         }
 
-        // Отсекаем коллизии
         foreach ($targetCells as $lane => $cells) {
             foreach ($cells as $pos => $ids) {
                 if (count($ids) > 1) {
@@ -125,7 +100,6 @@ class ExtendedNagelService extends NagelSchreckenbergService
             }
         }
 
-        // Применяем
         foreach ($machines as &$car) {
             if (isset($intents[$car['id']])) {
                 $car['lane'] = $intents[$car['id']];
@@ -136,9 +110,6 @@ class ExtendedNagelService extends NagelSchreckenbergService
         return $machines;
     }
 
-    /**
-     * Шаг смены полосы целиком.
-     */
     private function changeLanes(
         array $machines,
         int $roadLength,
@@ -158,17 +129,14 @@ class ExtendedNagelService extends NagelSchreckenbergService
         float $p = 0.3,
         float $pChange = 1.0
     ): array {
-        $history = [];
+        $history        = [];
         $currentMachines = $initialState;
-        $history[] = $currentMachines;
+        $history[]      = $currentMachines;
 
         for ($t = 0; $t < $iterations; $t++) {
-
-            // 1. Фаза смены полосы (синхронно, с разрешением конфликтов)
             $currentMachines = $this->changeLanes($currentMachines, $roadLength, $vMax, $pChange);
 
-            // 2. Фаза продольного движения: отдельно по каждой полосе
-            $grid = $this->buildGrid($currentMachines, $roadLength);
+            $grid              = $this->buildGrid($currentMachines, $roadLength);
             $nextMachinesState = [];
 
             foreach ($currentMachines as $car) {
@@ -187,7 +155,7 @@ class ExtendedNagelService extends NagelSchreckenbergService
                 ];
             }
 
-            $history[] = $nextMachinesState;
+            $history[]       = $nextMachinesState;
             $currentMachines = $nextMachinesState;
         }
 

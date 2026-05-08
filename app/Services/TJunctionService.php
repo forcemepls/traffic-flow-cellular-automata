@@ -88,6 +88,7 @@ class TJunctionService
     // каждом шаге.
     // -------------------------------------------------------
     const P_SLOW_START = 0.5;
+    const SPAWN_MIN_GAP = 6;
 
     // -------------------------------------------------------
     // Медленное ускорение
@@ -201,15 +202,39 @@ class TJunctionService
         $lambdas = [self::ARM_W => $lW, self::ARM_E => $lE, self::ARM_S => $lS];
 
         foreach ($lambdas as $arm => $lambda) {
-            $prob = $lambda / 60.0;  // λ авт/мин → вероятность за 1 секунду
-            if ((mt_rand() / mt_getrandmax()) < $prob) {
-                $goal = $this->pickGoal($arm);
-                $state['queues'][$arm][] = $this->makeCar($state['nextId'], $arm, $goal);
-                $state['nextId']++;
-                $state['spawned']++;
-            }
+            if ($lambda <= 0) continue;
+
+            // Не спавним, если въездная зона ещё занята предыдущей машиной
+            if ($this->isSpawnZoneBusy($state['machines'], $arm)) continue;
+
+            // Пуассоновский спавн: за шаг (1 секунду) вероятность p = λ/60
+            $prob = min(1.0, $lambda / 60.0);
+            if ((mt_rand() / mt_getrandmax()) >= $prob) continue;
+
+            $goal = $this->pickGoal($arm);
+            $state['queues'][$arm][] = $this->makeCar($state['nextId'], $arm, $goal);
+            $state['nextId']++;
+            $state['spawned']++;
         }
         return $state;
+    }
+
+    /**
+     * Зона перед въездом занята, если в первых SPAWN_MIN_GAP клетках
+     * DIR_IN уже стоит/едет машина. Это страхует от спавна "впритык"
+     * и даёт лидеру разогнаться без помех от хвоста.
+     */
+    private function isSpawnZoneBusy(array $machines, string $arm): bool
+    {
+        foreach ($machines as $car) {
+            if ($car['inJunction']) continue;
+            if ($car['arm'] !== $arm) continue;
+            if ($car['dir'] !== self::DIR_IN) continue;
+            if ($car['position'] < self::SPAWN_MIN_GAP) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function pickGoal(string $arm): string

@@ -32,7 +32,7 @@ let isPlaying     = false;
 let animationId   = null;
 let lastFrameTime = 0;
 let stepProgress  = 0;
-const STEP_MS     = 600;
+const STEP_MS     = 1000;
 
 // ─────────────────────────────────────────────
 // Konva
@@ -363,13 +363,17 @@ function drawStep(stepIndex) {
     if (!snap) return;
 
     // === DEBUG ===
-    const inJ   = snap.machines.filter(m => m.inJunction);
-    const outZero = snap.machines.filter(m => !m.inJunction && m.dir === 'out' && m.position <= 2);
-    if (inJ.length || outZero.length > 1) {
-        console.log(`step=${stepIndex}`,
-            'inJ:', JSON.stringify(inJ.map(m => ({id:m.id, arm:m.arm, goal:m.goal, p:m.junctionProgress, sp:m.speed}))),
-            'outOI:', JSON.stringify(outZero.map(m => ({id:m.id, arm:m.arm, dir:m.dir, pos:m.position, sp:m.speed})))
-        );
+    if (stepIndex >= 30 && stepIndex <= 60) {
+        console.log(`step=${stepIndex}`, JSON.stringify(
+            snap.machines.map(m => ({
+                id: m.id,
+                a: m.arm,
+                d: m.dir,
+                p: m.position,
+                s: m.speed,
+                j: m.inJunction ? 1 : 0
+            }))
+        ));
     }
     // === /DEBUG ===
 
@@ -395,6 +399,16 @@ function drawInterpolated(stepIndex, t) {
     const snapA = simulationHistory[stepIndex];
     const snapB = simulationHistory[stepIndex + 1];
     if (!snapA || !snapB) { drawStep(stepIndex); return; }
+
+    // === DEBUG INTERP ===
+    if (window._dbgCarId !== undefined && stepIndex !== window._dbgLastStep) {
+        window._dbgLastStep = stepIndex;
+        const a = snapA.machines.find(m => m.id === window._dbgCarId);
+        const b = snapB.machines.find(m => m.id === window._dbgCarId);
+        const fmt = m => m ? `${m.arm}/${m.dir}/${m.position} sp=${m.speed} j=${m.inJunction?1:0} pr=${m.junctionProgress??'-'}` : 'absent';
+        console.log(`step ${stepIndex}->${stepIndex+1}  id=${window._dbgCarId}: ${fmt(a)}  →  ${fmt(b)}`);
+    }
+    // === /DEBUG INTERP ===
 
     const mapB = new Map(snapB.machines.map(m => [m.id, m]));
 
@@ -528,20 +542,22 @@ function startPlay() {
     isPlaying     = true;
     lastFrameTime = 0;
     stepProgress  = 0;
+    document.getElementById('icon-play').innerHTML = '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>';
+    document.getElementById('text-play').textContent = 'Пауза';
     const btn = document.getElementById('btn-play');
-    btn.textContent = '⏸ Пауза';
-    btn.classList.replace('bg-emerald-500', 'bg-amber-500');
-    btn.classList.replace('hover:bg-emerald-600', 'hover:bg-amber-600');
+    btn.classList.remove('from-emerald-500', 'to-green-500', 'hover:from-emerald-600', 'hover:to-green-600', 'hover:shadow-green-500/25', 'focus:ring-green-400');
+    btn.classList.add('from-amber-500', 'to-yellow-500', 'hover:from-amber-600', 'hover:to-yellow-600', 'hover:shadow-amber-500/25', 'focus:ring-amber-400');
     animationId = requestAnimationFrame(gameLoop);
 }
 
 function stopPlay() {
     isPlaying = false;
     cancelAnimationFrame(animationId);
+    document.getElementById('icon-play').innerHTML = '<path d="M8 5v14l11-7z"/>';
+    document.getElementById('text-play').textContent = 'Воспроизведение';
     const btn = document.getElementById('btn-play');
-    btn.textContent = '▶ Старт';
-    btn.classList.replace('bg-amber-500', 'bg-emerald-500');
-    btn.classList.replace('hover:bg-amber-600', 'hover:bg-emerald-600');
+    btn.classList.remove('from-amber-500', 'to-yellow-500', 'hover:from-amber-600', 'hover:to-yellow-600', 'hover:shadow-amber-500/25', 'focus:ring-amber-400');
+    btn.classList.add('from-emerald-500', 'to-green-500', 'hover:from-emerald-600', 'hover:to-green-600', 'hover:shadow-green-500/25', 'focus:ring-green-400');
 }
 
 // ─────────────────────────────────────────────

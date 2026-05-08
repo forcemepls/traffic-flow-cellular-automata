@@ -211,25 +211,79 @@ function carXY(arm, dir, pos, L) {
 }
 
 // ─────────────────────────────────────────────
-// Позиция в узле: машина становится между въездной клеткой
-// и целевой выездной клеткой (середина траектории)
+// Траектория через узел (квадратичная Безье)
+//
+// Машина едет от стоп-линии своего DIR_IN к началу целевого DIR_OUT.
+// Линейная интерполяция давала диагональный «срез» через узел и
+// визуальные наезды; кривая Безье с контрольной точкой на пересечении
+// продолжений обеих полос даёт нормальный поворот.
 // ─────────────────────────────────────────────
 
-function junctionXY(car, L) {
-    // Точка, откуда машина пришла — последняя клетка её въездной полосы
-    const from = carXY(car.arm, 'in', L - 1, L);
-    // Точка, куда машина едет — первая клетка целевого выездного плеча
-    const to   = carXY(car.goal, 'out', 0, L);
-    // Берём середину
-    const x = (from.x + to.x) / 2;
-    const y = (from.y + to.y) / 2;
+// Точка въезда в узел — конец стоп-линии своего DIR_IN
+function junctionEntry(arm, L) {
+    return carXY(arm, 'in', L - 1, L);
+}
 
-    // Угол — направление от from к to
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    let angle = Math.atan2(dy, dx) * 180 / Math.PI;
+// Точка выхода из узла — начало целевого DIR_OUT
+function junctionExit(goal, L) {
+    return carXY(goal, 'out', 0, L);
+}
 
-    return { x, y, angle };
+// Контрольная точка кривой — пересечение «продолжения» полосы въезда
+// и «продолжения» полосы выезда. Геометрически это и есть
+// «угол поворота» рулевой траектории.
+function junctionControl(arm, goal, L) {
+    const entry = junctionEntry(arm, L);
+    const exit  = junctionExit(goal, L);
+
+    // Каждая полоса коллинеарна одной из осей. Берём X от того,
+    // кто движется горизонтально, и Y от того, кто движется
+    // вертикально. Для прямого хода (W↔E) обе движутся по X,
+    // там просто середина.
+    const isHoriz = a => a === 'W' || a === 'E';
+    const isVert  = a => a === 'S';
+
+    if (isHoriz(arm) && isHoriz(goal)) {
+        return { x: (entry.x + exit.x) / 2, y: entry.y };
+    }
+    if (isVert(arm) && isVert(goal)) {
+        return { x: entry.x, y: (entry.y + exit.y) / 2 };
+    }
+    // Смешанный случай: горизонтальный + вертикальный
+    if (isHoriz(arm)) {
+        return { x: exit.x, y: entry.y };
+    }
+    return { x: entry.x, y: exit.y };
+}
+
+// Точка на квадратичной Безье в момент t ∈ [0,1]
+function bezier(p0, p1, p2, t) {
+    const u = 1 - t;
+    return {
+        x: u * u * p0.x + 2 * u * t * p1.x + t * t * p2.x,
+        y: u * u * p0.y + 2 * u * t * p1.y + t * t * p2.y,
+    };
+}
+
+// Производная Безье (для угла поворота кузова)
+function bezierTangent(p0, p1, p2, t) {
+    return {
+        x: 2 * (1 - t) * (p1.x - p0.x) + 2 * t * (p2.x - p1.x),
+        y: 2 * (1 - t) * (p1.y - p0.y) + 2 * t * (p2.y - p1.y),
+    };
+}
+
+// Позиция машины внутри узла на момент t ∈ [0,1] её прохождения через узел.
+// Когда снапшот единственный (статичный кадр) — берём середину t=0.5.
+function junctionXY(car, L, t = 0.5) {
+    const p0 = junctionEntry(car.arm, L);
+    const p2 = junctionExit(car.goal, L);
+    const p1 = junctionControl(car.arm, car.goal, L);
+
+    const pt   = bezier(p0, p1, p2, t);
+    const tan  = bezierTangent(p0, p1, p2, t);
+    const angle = Math.atan2(tan.y, tan.x) * 180 / Math.PI;
+    return { x: pt.x, y: pt.y, angle };
 }
 
 // ─────────────────────────────────────────────
@@ -338,27 +392,73 @@ function drawInterpolated(stepIndex, t) {
         const carB = mapB.get(carA.id);
         if (!carB) return;
 
-        const a = carA.inJunction
-            ? junctionXY(carA, roadLength)
-            : carXY(carA.arm, carA.dir, carA.position, roadLength);
-        const b = carB.inJunction
-            ? junctionXY(carB, roadLength)
-            : carXY(carB.arm, carB.dir, carB.position, roadLength);
-
-        const x = a.x + (b.x - a.x) * t;
-        const y = a.y + (b.y - a.y) * t;
-
-        // Плавный поворот: интерполируем угол кратчайшим путём
-        let da = b.angle - a.angle;
-        if (da > 180)  da -= 360;
-        if (da < -180) da += 360;
-        const angle = a.angle + da * t;
-
-        layer.add(makeCar(x, y, angle, carA));
+        const pos = positionAtT(carA, carB, t, roadLength);
+        layer.add(makeCar(pos.x, pos.y, pos.angle, carA));
     });
 
     layer.draw();
     updateUI(snapA, stepIndex);
+}
+
+// ─────────────────────────────────────────────
+// Главная диспетчеризация переходов A→B
+//
+// Внутри узла траектория — кривая Безье. Переходы DIR_IN→inJunction
+// и inJunction→DIR_OUT — части той же кривой (первая половина и вторая
+// половина). Это убирает «диагональный срез» через узел.
+// ─────────────────────────────────────────────
+
+function positionAtT(carA, carB, t, L) {
+    const aIn = carA.inJunction;
+    const bIn = carB.inJunction;
+
+    // Полностью внутри узла: продвигаем по кривой Безье от 0.25 к 0.75
+    // (середина прохождения; реально шагов в узле редко больше одного,
+    // но если затормозила — анимация остаётся стабильной).
+    if (aIn && bIn) {
+        return junctionXY(carA, L, 0.5);
+    }
+
+    // Въезд в узел: машина была на DIR_IN, стала inJunction.
+    // Первая половина кривой — от стоп-линии к середине узла.
+    if (!aIn && bIn) {
+        const p0 = carXY(carA.arm, carA.dir, carA.position, L);
+        const p2 = junctionExit(carB.goal, L);
+        const p1 = junctionControl(carB.arm, carB.goal, L);
+        // t ∈ [0,1] для перехода → bezier параметр от 0 к 0.5
+        return bezierAt(p0, p1, p2, t * 0.5);
+    }
+
+    // Выезд из узла: машина была inJunction, стала DIR_OUT pos=0.
+    // Вторая половина кривой — от середины узла к выезду.
+    if (aIn && !bIn) {
+        const p0 = junctionEntry(carA.arm, L);
+        const p2 = carXY(carB.arm, carB.dir, carB.position, L);
+        const p1 = junctionControl(carA.arm, carA.goal, L);
+        // bezier параметр от 0.5 к 1.0
+        return bezierAt(p0, p1, p2, 0.5 + t * 0.5);
+    }
+
+    // Обычный случай: обе точки на полосах. Линейная интерполяция работает.
+    const a = carXY(carA.arm, carA.dir, carA.position, L);
+    const b = carXY(carB.arm, carB.dir, carB.position, L);
+    const x = a.x + (b.x - a.x) * t;
+    const y = a.y + (b.y - a.y) * t;
+
+    let da = b.angle - a.angle;
+    if (da > 180)  da -= 360;
+    if (da < -180) da += 360;
+    const angle = a.angle + da * t;
+
+    return { x, y, angle };
+}
+
+// Хелпер: позиция + угол на кривой Безье в момент t
+function bezierAt(p0, p1, p2, t) {
+    const pt  = bezier(p0, p1, p2, t);
+    const tan = bezierTangent(p0, p1, p2, t);
+    const angle = Math.atan2(tan.y, tan.x) * 180 / Math.PI;
+    return { x: pt.x, y: pt.y, angle };
 }
 
 // ─────────────────────────────────────────────

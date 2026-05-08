@@ -48,13 +48,22 @@ class TJunctionService
         self::ARM_S => ['E' => 0.5, 'W' => 0.5],
     ];
 
-    // Двухступенчатое торможение перед поворотом.
-    // За FAR_DISTANCE клеток скорость режется до FAR_SPEED,
-    // за NEAR_DISTANCE — до NEAR_SPEED. Даёт плавное замедление 4 → 3 → 2.
-    const TURN_BRAKE_FAR_DISTANCE  = 8;
-    const TURN_BRAKE_FAR_SPEED     = 3;
-    const TURN_BRAKE_NEAR_DISTANCE = 4;
-    const TURN_BRAKE_NEAR_SPEED    = 2;
+    // Плавное торможение перед узлом (anticipation rule).
+    //
+    // Применяется в двух случаях:
+    //   1) машина поворачивает (любой манёвр кроме сквозного W↔E),
+    //   2) манёвр запрещён текущей фазой светофора (красный для неё).
+    //
+    // Формула: effectiveVMax = ceil(distToStopLine / BRAKE_RATE).
+    // При BRAKE_RATE=2 получается линейная "лестница": 4 клетки → v≤2,
+    // 6 клеток → v≤3, 8 → v≤4. Машина видит запрет/поворот заранее и
+    // снижает скорость плавно, без обрыва в одну клетку.
+    //
+    // Это аналог anticipation rule из Knospe et al. 2000 (brake light
+    // model): водитель реагирует не только на gap до лидера, но и на
+    // внешний сигнал торможения — здесь таким сигналом служит сам
+    // светофор и геометрия поворота.
+    const BRAKE_RATE = 2;
 
     // Фазы
     const PHASE_MAIN = 'main';
@@ -63,14 +72,22 @@ class TJunctionService
     // -------------------------------------------------------
     // VDR (Velocity-Dependent Randomization, Barlovic et al. 1998)
     //
-    // Стоящая машина (v=0) тормозит с повышенной вероятностью —
-    // моделирует "медленный старт" реальных водителей.
-    // Едущая машина (v>0) тормозит со штатной p.
+    // Ключевая идея модели: вероятность торможения зависит от скорости.
+    // Стоящие машины (v=0) "тупят" на старте сильнее, чем едущие
+    // случайно тормозят на ходу. В оригинальной работе:
+    //     p_slow ∈ [0.5, 0.75],  p_drive ∈ [0.01, 0.1]
     //
-    // P_SLOW_START — вероятность отказаться стартовать на этом шаге.
-    // 0.15 = реалистичная задержка реакции (~1 шаг ожидания на остановке).
+    // Это даёт два важных эффекта:
+    //  1) метастабильность свободного потока при средней плотности,
+    //  2) реалистичные "медленные старты" из заторов и от светофора.
+    //
+    // P_SLOW_START — вероятность остаться на месте при v=0 (модель
+    // задержки реакции водителя на зелёный/освобождение лидера).
+    // p_drive приходит из UI и применяется к движущимся машинам;
+    // дефолт в UI снижен до 0.1, чтобы движущиеся не "клевали" на
+    // каждом шаге.
     // -------------------------------------------------------
-    const P_SLOW_START = 0.15;
+    const P_SLOW_START = 0.5;
 
     // -------------------------------------------------------
     // Медленное ускорение
@@ -132,10 +149,17 @@ class TJunctionService
         float $lambdaW, float $lambdaE, float $lambdaS
     ): array {
         $state = $this->updateTrafficLight($state, $tPhaseMain, $tPhaseSec);
-        $state = $this->spawnCars($state, $lambdaW, $lambdaE, $lambdaS);
-        $state = $this->flushQueues($state);
+
+        // Сначала двигаем уже существующих, удаляем доехавших.
+        // Только после этого спавним новых и ставим их на въездную клетку 0.
+        // Так свежепоявившаяся машина попадает в снапшот этого шага именно
+        // на клетке 0 со speed=1 — и frontend рисует появление в нулевой
+        // точке. Движение начнётся в следующем шаге.
         $state = $this->moveCars($state, $roadLength, $vMax, $p);
         $state = $this->removeCars($state, $roadLength);
+        $state = $this->spawnCars($state, $lambdaW, $lambdaE, $lambdaS);
+        $state = $this->flushQueues($state);
+
         return $state;
     }
 
@@ -357,19 +381,17 @@ class TJunctionService
         $pos            = $car['position'];
         $distToStopLine = ($roadLength - 1) - $pos;  // 0 = вплотную к узлу
 
-        // Машины, поворачивающие, плавно тормозят перед узлом
-        // Двухступенчатая зона: дальняя — до FAR_SPEED, ближняя — до NEAR_SPEED.
-        $effectiveVMax  = $vMax;
-        $isTurning      = $this->isTurning($car['arm'], $car['goal']);
-        if ($isTurning) {
-            if ($distToStopLine <= self::TURN_BRAKE_NEAR_DISTANCE) {
-                $effectiveVMax = self::TURN_BRAKE_NEAR_SPEED;
-            } elseif ($distToStopLine <= self::TURN_BRAKE_FAR_DISTANCE) {
-                $effectiveVMax = self::TURN_BRAKE_FAR_SPEED;
-            }
-        }
+        $allowed   = $this->isManoeuvreAllowed($car['arm'], $car['goal'], $phase);
+        $isTurning = $this->isTurning($car['arm'], $car['goal']);
 
-        $allowed = $this->isManoeuvreAllowed($car['arm'], $car['goal'], $phase);
+        // Anticipation: плавно тормозим, если впереди узел требует
+        // снижения скорости — поворот или красный для нашего манёвра.
+        // Сквозной зелёный — едем на vMax без ограничения.
+        $effectiveVMax = $vMax;
+        if ($isTurning || !$allowed) {
+            $brakingCap    = max(1, (int) ceil($distToStopLine / self::BRAKE_RATE));
+            $effectiveVMax = min($vMax, $brakingCap);
+        }
 
         // gap до лидера на той же полосе
         $gapToLeader = $this->gapToLeaderInbound($grid, $car, $roadLength);

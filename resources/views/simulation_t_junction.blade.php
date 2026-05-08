@@ -43,7 +43,7 @@
                class="border border-gray-300 p-2.5 w-full mb-3 rounded-lg bg-gray-50 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all">
 
         <label class="block mb-1 text-sm font-bold text-gray-600">Вероятность торможения (p):</label>
-        <input type="number" id="inp-p" value="0.3" step="0.05" min="0" max="1"
+        <input type="number" id="inp-p" value="0.1" step="0.05" min="0" max="1"
                class="border border-gray-300 p-2.5 w-full mb-5 rounded-lg bg-gray-50 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all">
 
         <hr class="border-gray-200 mb-4">

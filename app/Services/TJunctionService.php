@@ -275,11 +275,34 @@ class TJunctionService
     private function moveCars(array $state, int $roadLength, int $vMax, float $p): array
     {
         $grid = $this->buildGrid($state['machines']);
+
+        // Прогноз: какие клетки DIR_OUT[arm][0] будут СВОБОДНЫ после
+        // движения машин, уже стоящих на этих клетках. Машина в узле
+        // не должна ждать "лишний шаг" из-за того, что лидер на pos=0
+        // уже планирует уехать в этом же шаге.
+        $exitWillBeFree = [];
+        foreach ([self::ARM_W, self::ARM_E, self::ARM_S] as $arm) {
+            $exitWillBeFree[$arm] = !isset($grid[$arm][self::DIR_OUT][0]);
+        }
+        foreach ($state['machines'] as $car) {
+            if ($car['inJunction']) continue;
+            if ($car['dir'] !== self::DIR_OUT) continue;
+            if ($car['position'] !== 0) continue;
+            // Машина на pos=0 DIR_OUT. Если она хоть как-то двинется
+            // в этот шаг (gap>0 и speed позволяет), клетка освободится.
+            // Точный gap считать дорого — простое условие: впереди
+            // нет машины на pos=1.
+            $arm = $car['arm'];
+            if (!isset($grid[$arm][self::DIR_OUT][1])) {
+                $exitWillBeFree[$arm] = true;
+            }
+        }
+
         $intentions = [];
 
         foreach ($state['machines'] as $car) {
             if ($car['inJunction']) {
-                $intentions[$car['id']] = $this->planExitJunction($car, $grid);
+                $intentions[$car['id']] = $this->planExitJunction($car, $grid, $exitWillBeFree);
                 continue;
             }
             if ($car['dir'] === self::DIR_IN) {
@@ -289,15 +312,13 @@ class TJunctionService
             }
         }
 
-        // Конфликты: одновременный въезд в узел
         $intentions = $this->resolveJunctionConflicts($intentions, $state['machines']);
+        $intentions = $this->resolveExitConflicts($intentions, $state['machines']);
 
-        // Применяем
         foreach ($intentions as $id => $intent) {
             $state['machines'][$id] = array_merge($state['machines'][$id], $intent);
         }
 
-        // Обновляем waitedAt — кто встал перед узлом
         foreach ($state['machines'] as $id => &$car) {
             $atStopLine = !$car['inJunction']
                 && $car['dir'] === self::DIR_IN
@@ -425,6 +446,7 @@ class TJunctionService
                 'waitedAt'   => null,
                 'accelTimer' => $accelTimer,
                 'justEntered'=> false,
+                'junctionProgress' => 0.5,
             ];
         }
 
@@ -500,26 +522,30 @@ class TJunctionService
     // Выход из узла на выездную полосу
     // ---------------------------------------------------------------
 
-    private function planExitJunction(array $car, array $grid): array
+    private function planExitJunction(array $car, array $grid, array $exitWillBeFree = []): array
     {
         $targetArm = $car['goal'];
-        // Выездная клетка 0 целевого плеча. Если занята — стоим в узле ещё шаг.
-        if (isset($grid[$targetArm][self::DIR_OUT][0])) {
+        $willBeFree = $exitWillBeFree[$targetArm] ?? !isset($grid[$targetArm][self::DIR_OUT][0]);
+
+        if ($willBeFree) {
             return [
-                'inJunction' => true,
-                'arm'        => $car['arm'],
-                'dir'        => $car['dir'],
-                'speed'      => 0,
+                'arm'         => $targetArm,
+                'dir'         => self::DIR_OUT,
+                'position'    => 0,
+                'speed'       => 1,
+                'inJunction'  => false,
+                'accelTimer'  => 0,
+                'justEntered' => true,
             ];
         }
+
         return [
-            'arm'         => $targetArm,
-            'dir'         => self::DIR_OUT,
-            'position'    => 0,
-            'speed'       => 1,
-            'inJunction'  => false,
-            'accelTimer'  => 0,    // на выезде ускоряемся с нуля плавно
-            'justEntered' => true, // только вышли — пропускаем VDR на первом шаге
+            'inJunction'       => true,
+            'arm'              => $car['arm'],
+            'dir'              => $car['dir'],
+            'goal'             => $car['goal'],
+            'speed'            => 0,
+            'junctionProgress' => $car['junctionProgress'] ?? 0.5,
         ];
     }
 
@@ -602,6 +628,63 @@ class TJunctionService
                 'speed'      => 0,
                 'inJunction' => false,
             ];
+        }
+
+        return $intentions;
+    }
+
+    private function resolveExitConflicts(array $intentions, array $machines): array
+    {
+        // Группируем намерения по целевой клетке (arm, dir, position).
+        // Интерес — только машины, которые в этом шаге окажутся
+        // на DIR_OUT pos=0 (выход из узла или новые машины).
+        $targets = [];
+        foreach ($intentions as $id => $intent) {
+            $arm = $intent['arm'] ?? $machines[$id]['arm'];
+            $dir = $intent['dir'] ?? $machines[$id]['dir'];
+            $pos = $intent['position'] ?? $machines[$id]['position'];
+            $inJ = $intent['inJunction'] ?? $machines[$id]['inJunction'];
+
+            if (!$inJ && $dir === self::DIR_OUT && $pos === 0) {
+                $targets[$arm][] = $id;
+            }
+        }
+
+        foreach ($targets as $arm => $ids) {
+            if (count($ids) <= 1) continue;
+
+            // Приоритет — машина, которая УЖЕ была в узле (она дольше ждёт).
+            // Если такая одна — она проезжает, остальные блокируются.
+            // Если все одинаково (все из узла или все из очереди) — берём
+            // меньший id для детерминированности.
+            usort($ids, function ($a, $b) use ($machines) {
+                $aInJ = $machines[$a]['inJunction'] ? 0 : 1;
+                $bInJ = $machines[$b]['inJunction'] ? 0 : 1;
+                if ($aInJ !== $bInJ) return $aInJ <=> $bInJ;
+                return $a <=> $b;
+            });
+
+            $winner = array_shift($ids);
+            foreach ($ids as $id) {
+                $car = $machines[$id];
+                if ($car['inJunction']) {
+                    $intentions[$id] = [
+                        'inJunction'       => true,
+                        'arm'              => $car['arm'],
+                        'dir'              => $car['dir'],
+                        'goal'             => $car['goal'],
+                        'speed'            => 0,
+                        'junctionProgress' => $car['junctionProgress'] ?? 0.0,
+                    ];
+                } else {
+                    // Стоит на стоп-линии своего DIR_IN
+                    $intentions[$id] = [
+                        'position'   => $car['position'],
+                        'speed'      => 0,
+                        'inJunction' => false,
+                    ];
+                }
+            }
         }
 
         return $intentions;

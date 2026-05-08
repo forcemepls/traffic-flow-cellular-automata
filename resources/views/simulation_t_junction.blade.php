@@ -31,7 +31,7 @@
         <h3 class="font-bold text-gray-700 mb-3">Параметры дороги</h3>
 
         <label class="block mb-1 text-sm font-bold text-gray-600">Длина плеча (L):</label>
-        <input type="number" id="inp-roadLength" value="50" min="20" max="200"
+        <input type="number" id="inp-roadLength" value="10" min="20" max="200"
                class="border border-gray-300 p-2.5 w-full mb-3 rounded-lg bg-gray-50 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all">
 
         <label class="block mb-1 text-sm font-bold text-gray-600">Итерации (шаги / секунды):</label>
@@ -50,22 +50,22 @@
         <h3 class="font-bold text-gray-700 mb-3">Светофор</h3>
 
         <label class="block mb-1 text-sm font-bold text-gray-600">Фаза главной (сек):</label>
-        <input type="number" id="inp-tPhaseMain" value="60" min="5" max="300"
+        <input type="number" id="inp-tPhaseMain" value="10" min="5" max="300"
                class="border border-gray-300 p-2.5 w-full mb-3 rounded-lg bg-gray-50 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all">
 
         <label class="block mb-1 text-sm font-bold text-gray-600">Фаза второстепенной (сек):</label>
-        <input type="number" id="inp-tPhaseSec" value="30" min="5" max="300"
+        <input type="number" id="inp-tPhaseSec" value="10" min="5" max="300"
                class="border border-gray-300 p-2.5 w-full mb-5 rounded-lg bg-gray-50 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all">
 
         <hr class="border-gray-200 mb-4">
         <h3 class="font-bold text-gray-700 mb-3">Интенсивность въездов (авт/мин)</h3>
 
         <label class="block mb-1 text-sm font-bold text-gray-600">Запад (λ<sub>W</sub>):</label>
-        <input type="number" id="inp-lambdaW" value="30" min="0" max="120" step="1"
+        <input type="number" id="inp-lambdaW" value="15" min="0" max="120" step="1"
                class="border border-gray-300 p-2.5 w-full mb-3 rounded-lg bg-gray-50 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all">
 
         <label class="block mb-1 text-sm font-bold text-gray-600">Восток (λ<sub>E</sub>):</label>
-        <input type="number" id="inp-lambdaE" value="30" min="0" max="120" step="1"
+        <input type="number" id="inp-lambdaE" value="15" min="0" max="120" step="1"
                class="border border-gray-300 p-2.5 w-full mb-3 rounded-lg bg-gray-50 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all">
 
         <label class="block mb-1 text-sm font-bold text-gray-600">Юг (λ<sub>S</sub>):</label>

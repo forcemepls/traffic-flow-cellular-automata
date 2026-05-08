@@ -233,27 +233,26 @@ function junctionExit(goal, L) {
 // и «продолжения» полосы выезда. Геометрически это и есть
 // «угол поворота» рулевой траектории.
 function junctionControl(arm, goal, L) {
+    const half = LANE_W / 2;
+
+    // Контрольные точки Безье. Для левых поворотов точка выносится
+    // в дальний угол узла, чтобы дуга шла широко через центр —
+    // иначе машина "срезает" поворот и пересекает встречные траектории.
+    const CONTROL = {
+        // Правые повороты — через ближний угол узла
+        'W->S': { x: -half, y: +half },
+        'S->E': { x: +half, y: +half },
+        // Левые повороты — через дальний угол (диагональ от ближнего)
+        'E->S': { x: -half, y: +half },
+        'S->W': { x: +half, y: -half },
+    };
+
+    const key = `${arm}->${goal}`;
+    if (CONTROL[key]) return CONTROL[key];
+
     const entry = junctionEntry(arm, L);
     const exit  = junctionExit(goal, L);
-
-    // Каждая полоса коллинеарна одной из осей. Берём X от того,
-    // кто движется горизонтально, и Y от того, кто движется
-    // вертикально. Для прямого хода (W↔E) обе движутся по X,
-    // там просто середина.
-    const isHoriz = a => a === 'W' || a === 'E';
-    const isVert  = a => a === 'S';
-
-    if (isHoriz(arm) && isHoriz(goal)) {
-        return { x: (entry.x + exit.x) / 2, y: entry.y };
-    }
-    if (isVert(arm) && isVert(goal)) {
-        return { x: entry.x, y: (entry.y + exit.y) / 2 };
-    }
-    // Смешанный случай: горизонтальный + вертикальный
-    if (isHoriz(arm)) {
-        return { x: exit.x, y: entry.y };
-    }
-    return { x: entry.x, y: exit.y };
+    return { x: (entry.x + exit.x) / 2, y: (entry.y + exit.y) / 2 };
 }
 
 // Точка на квадратичной Безье в момент t ∈ [0,1]
@@ -275,13 +274,16 @@ function bezierTangent(p0, p1, p2, t) {
 
 // Позиция машины внутри узла на момент t ∈ [0,1] её прохождения через узел.
 // Когда снапшот единственный (статичный кадр) — берём середину t=0.5.
-function junctionXY(car, L, t = 0.5) {
+function junctionXY(car, L, t) {
     const p0 = junctionEntry(car.arm, L);
     const p2 = junctionExit(car.goal, L);
     const p1 = junctionControl(car.arm, car.goal, L);
 
-    const pt   = bezier(p0, p1, p2, t);
-    const tan  = bezierTangent(p0, p1, p2, t);
+    const tt = (t !== undefined) ? t
+        : (car.junctionProgress !== undefined ? car.junctionProgress : 0.5);
+
+    const pt   = bezier(p0, p1, p2, tt);
+    const tan  = bezierTangent(p0, p1, p2, tt);
     const angle = Math.atan2(tan.y, tan.x) * 180 / Math.PI;
     return { x: pt.x, y: pt.y, angle };
 }
@@ -360,6 +362,17 @@ function drawStep(stepIndex) {
     const snap = simulationHistory[stepIndex];
     if (!snap) return;
 
+    // === DEBUG ===
+    const inJ   = snap.machines.filter(m => m.inJunction);
+    const outZero = snap.machines.filter(m => !m.inJunction && m.dir === 'out' && m.position <= 2);
+    if (inJ.length || outZero.length > 1) {
+        console.log(`step=${stepIndex}`,
+            'inJ:', JSON.stringify(inJ.map(m => ({id:m.id, arm:m.arm, goal:m.goal, p:m.junctionProgress, sp:m.speed}))),
+            'outOI:', JSON.stringify(outZero.map(m => ({id:m.id, arm:m.arm, dir:m.dir, pos:m.position, sp:m.speed})))
+        );
+    }
+    // === /DEBUG ===
+
     layer.destroyChildren();
     drawTrafficLight(snap.phase);
 
@@ -412,34 +425,31 @@ function positionAtT(carA, carB, t, L) {
     const aIn = carA.inJunction;
     const bIn = carB.inJunction;
 
-    // Полностью внутри узла: продвигаем по кривой Безье от 0.25 к 0.75
-    // (середина прохождения; реально шагов в узле редко больше одного,
-    // но если затормозила — анимация остаётся стабильной).
+    // Обе в узле — машина застряла, рисуем статично в её прогрессе
     if (aIn && bIn) {
-        return junctionXY(carA, L, 0.5);
+        const progress = carA.junctionProgress ?? 0.5;
+        return junctionXY(carA, L, progress);
     }
 
-    // Въезд в узел: машина была на DIR_IN, стала inJunction.
-    // Первая половина кривой — от стоп-линии к середине узла.
+    // Въезд в узел: первая половина кривой (0 → 0.5)
     if (!aIn && bIn) {
         const p0 = carXY(carA.arm, carA.dir, carA.position, L);
         const p2 = junctionExit(carB.goal, L);
         const p1 = junctionControl(carB.arm, carB.goal, L);
-        // t ∈ [0,1] для перехода → bezier параметр от 0 к 0.5
-        return bezierAt(p0, p1, p2, t * 0.5);
+        const endProgress = carB.junctionProgress ?? 0.5;
+        return bezierAt(p0, p1, p2, t * endProgress);
     }
 
-    // Выезд из узла: машина была inJunction, стала DIR_OUT pos=0.
-    // Вторая половина кривой — от середины узла к выезду.
+    // Выезд из узла: вторая половина кривой (0.5 → 1.0)
     if (aIn && !bIn) {
         const p0 = junctionEntry(carA.arm, L);
         const p2 = carXY(carB.arm, carB.dir, carB.position, L);
         const p1 = junctionControl(carA.arm, carA.goal, L);
-        // bezier параметр от 0.5 к 1.0
-        return bezierAt(p0, p1, p2, 0.5 + t * 0.5);
+        const startProgress = carA.junctionProgress ?? 0.5;
+        return bezierAt(p0, p1, p2, startProgress + t * (1.0 - startProgress));
     }
 
-    // Обычный случай: обе точки на полосах. Линейная интерполяция работает.
+    // Обе на полосах
     const a = carXY(carA.arm, carA.dir, carA.position, L);
     const b = carXY(carB.arm, carB.dir, carB.position, L);
     const x = a.x + (b.x - a.x) * t;

@@ -153,8 +153,12 @@ class TJunctionStatisticsService
                         // Засчитываем фазу, в которой произошло пересечение —
                         // это та фаза, в которой машина была inJunction
                         // (т.е. предыдущая фаза снапшота).
-                        if ($prevPhase === 'main') $thrMain++;
-                        else                       $thrSec++;
+                        // Для PHASE_CLEAR: машина доезжает по узлу в фазе
+                        // очистки — относим к фазе, в которой она въехала.
+                        // Самый простой и корректный учёт: всё, что не sec —
+                        // это main + остаточный clear от main.
+                        if ($prevPhase === 'sec') $thrSec++;
+                        else                       $thrMain++;
 
                         // Манёвр: arm у машины — целевое плечо после выхода;
                         // before было исходное.
@@ -203,8 +207,10 @@ class TJunctionStatisticsService
         $stepsInPhaseMain = 0;
         $stepsInPhaseSec  = 0;
         foreach ($history as $snap) {
-            if (($snap['phase'] ?? 'main') === 'main') $stepsInPhaseMain++;
-            else                                       $stepsInPhaseSec++;
+            $ph = $snap['phase'] ?? 'main';
+            if ($ph === 'main')      $stepsInPhaseMain++;
+            elseif ($ph === 'sec')   $stepsInPhaseSec++;
+            // 'clear' не учитываем в знаменателе — это межфазная пауза
         }
         $throughputMainPerHour = $stepsInPhaseMain > 0
             ? round($thrMain * 3600 / $stepsInPhaseMain, 1) : 0;

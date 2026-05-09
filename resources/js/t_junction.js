@@ -13,8 +13,9 @@ const COLOR = {
     junction:  '#1A1A1A',
     marking:   '#FFFFFF',
     curb:      '#555555',
-    phaseMain: '#22C55E',
-    phaseSec:  '#F59E0B',
+    phaseMain:  '#22C55E',
+    phaseSec:   '#F59E0B',
+    phaseClear: '#EF4444',
     cars: [
         '#3B82F6','#EF4444','#10B981','#F59E0B',
         '#8B5CF6','#EC4899','#06B6D4','#F97316',
@@ -449,7 +450,10 @@ function makeCar(x, y, angle, car) {
 let trafficLight = null;
 function drawTrafficLight(phase) {
     if (trafficLight) trafficLight.destroy();
-    const c = phase === 'main' ? COLOR.phaseMain : COLOR.phaseSec;
+    let c;
+    if (phase === 'main')       c = COLOR.phaseMain;
+    else if (phase === 'sec')   c = COLOR.phaseSec;
+    else                        c = COLOR.phaseClear; // 'clear' — all-red
     trafficLight = new Konva.Circle({
         x: OX, y: OY,
         radius: LANE_W * 0.8,
@@ -466,6 +470,21 @@ function drawTrafficLight(phase) {
 function drawStep(stepIndex) {
     const snap = simulationHistory[stepIndex];
     if (!snap) return;
+
+    // === DEBUG ===
+    if (stepIndex >= 30 && stepIndex <= 60) {
+        console.log(`step=${stepIndex}`, JSON.stringify(
+            snap.machines.map(m => ({
+                id: m.id,
+                a: m.arm,
+                d: m.dir,
+                p: m.position,
+                s: m.speed,
+                j: m.inJunction ? 1 : 0
+            }))
+        ));
+    }
+    // === /DEBUG ===
 
     layer.destroyChildren();
     drawTrafficLight(snap.phase);
@@ -489,6 +508,16 @@ function drawInterpolated(stepIndex, t) {
     const snapA = simulationHistory[stepIndex];
     const snapB = simulationHistory[stepIndex + 1];
     if (!snapA || !snapB) { drawStep(stepIndex); return; }
+
+    // === DEBUG INTERP ===
+    if (window._dbgCarId !== undefined && stepIndex !== window._dbgLastStep) {
+        window._dbgLastStep = stepIndex;
+        const a = snapA.machines.find(m => m.id === window._dbgCarId);
+        const b = snapB.machines.find(m => m.id === window._dbgCarId);
+        const fmt = m => m ? `${m.arm}/${m.dir}/${m.position} sp=${m.speed} j=${m.inJunction?1:0} pr=${m.junctionProgress??'-'}` : 'absent';
+        console.log(`step ${stepIndex}->${stepIndex+1}  id=${window._dbgCarId}: ${fmt(a)}  →  ${fmt(b)}`);
+    }
+    // === /DEBUG INTERP ===
 
     const mapB = new Map(snapB.machines.map(m => [m.id, m]));
 
@@ -618,10 +647,14 @@ function updatePhaseIndicator(phase) {
         el.className    = 'mt-3 p-3 rounded-xl border border-green-300 bg-green-50 text-center';
         label.className = 'text-lg font-bold text-green-700 mt-1';
         label.textContent = '🟢 Главная (W ↔ E)';
-    } else {
+    } else if (phase === 'sec') {
         el.className    = 'mt-3 p-3 rounded-xl border border-amber-300 bg-amber-50 text-center';
         label.className = 'text-lg font-bold text-amber-700 mt-1';
         label.textContent = '🟡 Второстепенная (S, повороты)';
+    } else { // 'clear' — all-red intergreen
+        el.className    = 'mt-3 p-3 rounded-xl border border-red-300 bg-red-50 text-center';
+        label.className = 'text-lg font-bold text-red-700 mt-1';
+        label.textContent = '🔴 Очистка узла (all-red)';
     }
 }
 

@@ -1,5 +1,6 @@
 import './bootstrap';
 import Konva from 'konva';
+import Chart from 'chart.js/auto';
 
 // ─────────────────────────────────────────────
 // Геометрия и цвета
@@ -26,6 +27,7 @@ const carColor = id => COLOR.cars[id % COLOR.cars.length];
 // Состояние
 // ─────────────────────────────────────────────
 let simulationHistory = [];
+let statisticsData    = null;
 let currentStep   = 0;
 let roadLength    = 50;
 let isPlaying     = false;
@@ -33,6 +35,7 @@ let animationId   = null;
 let lastFrameTime = 0;
 let stepProgress  = 0;
 const STEP_MS     = 1000;
+let charts = {};
 
 // ─────────────────────────────────────────────
 // Konva
@@ -144,9 +147,17 @@ function drawRoad(L) {
             points: [OX + JW/2, y, OX + JW/2 + armLen, y], ...opts,
         }));
     });
-    // Сплошная y=0 — на всю длину, через узел
+    // Сплошная y=0 — на плечах, прерывается узлом.
+    // Внутри узла — пунктир (как реальная разметка перекрёстка),
+    // чтобы машины при поворотах визуально не пересекали сплошную.
     roadLayer.add(new Konva.Line({
-        points: [OX - JW/2 - armLen, OY, OX + JW/2 + armLen, OY], ...solidOpts,
+        points: [OX - JW/2 - armLen, OY, OX - JW/2, OY], ...solidOpts,
+    }));
+    roadLayer.add(new Konva.Line({
+        points: [OX + JW/2, OY, OX + JW/2 + armLen, OY], ...solidOpts,
+    }));
+    roadLayer.add(new Konva.Line({
+        points: [OX - JW/2, OY, OX + JW/2, OY], ...dashOpts,
     }));
 
     // ─── Разметка S ───
@@ -217,9 +228,11 @@ function carXY(arm, dir, pos, L, lane = 0) {
 
     if (arm === 'W') {
         if (dir === 'in') {
-            // едет вправо. THROUGH (правая по ходу) — у нижнего бордюра,
-            // TURN — у разделительной.
-            const y = (lane === 1) ? OY + half : OY + 3 * half;
+            // едет вправо. По ПДД для W→E (направо относительно S):
+            // правый поворот делается с правой (нижней по канвасу) полосы.
+            // THROUGH (lane=0, прямой) — у разделительной (верхняя),
+            // TURN    (lane=1, поворот на S) — у нижнего бордюра.
+            const y = (lane === 1) ? OY + 3 * half : OY + half;
             return {
                 x: OX - JW/2 - (L - 1 - pos) * CELL - half,
                 y,
@@ -238,8 +251,12 @@ function carXY(arm, dir, pos, L, lane = 0) {
 
     if (arm === 'E') {
         if (dir === 'in') {
-            // едет влево. THROUGH (правая по ходу) — у верхнего бордюра,
-            // TURN — у разделительной.
+            // едет влево. По ПДД для E→S (левый поворот относительно
+            // направления движения): с левой по ходу полосы.
+            // У машины, едущей влево, левая по ходу = ближе к
+            // разделительной y=0 (нижняя на канвасе).
+            // THROUGH (lane=0) — у верхнего бордюра,
+            // TURN    (lane=1) — у разделительной.
             const y = (lane === 1) ? OY - half : OY - 3 * half;
             return {
                 x: OX + JW/2 + (L - 1 - pos) * CELL + half,
@@ -247,8 +264,10 @@ function carXY(arm, dir, pos, L, lane = 0) {
                 angle: 180,
             };
         } else {
-            // DIR_OUT, едет вправо. Правая по ходу — у нижнего бордюра.
-            const y = (lane === 1) ? OY + half : OY + 3 * half;
+            // DIR_OUT, едет вправо. lane=0 — верхняя (у разделителя),
+            // чтобы прямой W→E (приходящий с верхней полосы W IN) не
+            // менял Y при проезде через узел.
+            const y = (lane === 1) ? OY + 3 * half : OY + half;
             return {
                 x: OX + JW/2 + pos * CELL + half,
                 y,
@@ -257,16 +276,19 @@ function carXY(arm, dir, pos, L, lane = 0) {
         }
     }
 
-    // S-плечо. Две внутренние полосы по центру (±LANE_W/2).
+    // S-плечо. Полная ширина плеча = JW (4*LANE_W); реально по
+    // одной полосе в каждую сторону шириной 2*LANE_W (от центра
+    // до бордюра). Машина ставится по центру СВОЕЙ полосы — на
+    // расстоянии LANE_W от разделителя x=0 и от внешнего бордюра.
     if (dir === 'in') {
         return {
-            x: OX + half,
+            x: OX + LANE_W,                       // центр правой полосы
             y: S_TOP + (L - 1 - pos) * CELL + half,
             angle: 270,
         };
     } else {
         return {
-            x: OX - half,
+            x: OX - LANE_W,                       // центр левой полосы
             y: S_TOP + pos * CELL + half,
             angle: 90,
         };
@@ -403,13 +425,6 @@ function makeCar(x, y, angle, car) {
         cornerRadius: [0, 3, 3, 0],
     }));
 
-    // Индикатор скорости (хвост машины)
-    g.add(new Konva.Circle({
-        x: -CELL * 0.38, y: 0,
-        radius: 3,
-        fill: car.speed > 0 ? '#22C55E' : '#EF4444',
-    }));
-
     // Номер машины — отдельным узлом, не вращается вместе с кузовом
     const label = new Konva.Text({
         text: String(car.id + 1),
@@ -452,21 +467,6 @@ function drawStep(stepIndex) {
     const snap = simulationHistory[stepIndex];
     if (!snap) return;
 
-    // === DEBUG ===
-    if (stepIndex >= 30 && stepIndex <= 60) {
-        console.log(`step=${stepIndex}`, JSON.stringify(
-            snap.machines.map(m => ({
-                id: m.id,
-                a: m.arm,
-                d: m.dir,
-                p: m.position,
-                s: m.speed,
-                j: m.inJunction ? 1 : 0
-            }))
-        ));
-    }
-    // === /DEBUG ===
-
     layer.destroyChildren();
     drawTrafficLight(snap.phase);
 
@@ -489,16 +489,6 @@ function drawInterpolated(stepIndex, t) {
     const snapA = simulationHistory[stepIndex];
     const snapB = simulationHistory[stepIndex + 1];
     if (!snapA || !snapB) { drawStep(stepIndex); return; }
-
-    // === DEBUG INTERP ===
-    if (window._dbgCarId !== undefined && stepIndex !== window._dbgLastStep) {
-        window._dbgLastStep = stepIndex;
-        const a = snapA.machines.find(m => m.id === window._dbgCarId);
-        const b = snapB.machines.find(m => m.id === window._dbgCarId);
-        const fmt = m => m ? `${m.arm}/${m.dir}/${m.position} sp=${m.speed} j=${m.inJunction?1:0} pr=${m.junctionProgress??'-'}` : 'absent';
-        console.log(`step ${stepIndex}->${stepIndex+1}  id=${window._dbgCarId}: ${fmt(a)}  →  ${fmt(b)}`);
-    }
-    // === /DEBUG INTERP ===
 
     const mapB = new Map(snapB.machines.map(m => [m.id, m]));
 
@@ -732,6 +722,7 @@ document.getElementById('btn-load').addEventListener('click', () => {
         .then(r => r.json())
         .then(data => {
             simulationHistory = data.history;
+            statisticsData    = data.statistics || null;
             currentStep  = 0;
             stepProgress = 0;
             stopPlay();
@@ -742,6 +733,8 @@ document.getElementById('btn-load').addEventListener('click', () => {
             document.getElementById('btn-play').disabled = false;
             document.getElementById('btn-prev').disabled = false;
             document.getElementById('btn-next').disabled = false;
+            const btnStat = document.getElementById('btn-statistics');
+            if (btnStat) btnStat.disabled = !statisticsData;
         })
         .catch(err => console.error('Ошибка:', err));
 });
@@ -759,3 +752,266 @@ document.getElementById('btn-next').addEventListener('click', () => {
     stopPlay();
     if (currentStep < simulationHistory.length - 1) { currentStep++; drawStep(currentStep); }
 });
+
+// ─────────────────────────────────────────────
+// Модалка статистики
+// ─────────────────────────────────────────────
+
+const modal          = document.getElementById('statistics-modal');
+const modalBackdrop  = document.getElementById('modal-backdrop');
+const modalClose     = document.getElementById('modal-close');
+const cardsContainer = document.getElementById('cards-container');
+const btnPrevCard    = document.getElementById('btn-prev-card');
+const btnNextCard    = document.getElementById('btn-next-card');
+const cardDots       = document.querySelectorAll('.card-dot');
+const btnStatistics  = document.getElementById('btn-statistics');
+
+let currentCardIndex = 0;
+const TOTAL_CARDS = 8;
+
+if (btnStatistics) {
+    btnStatistics.addEventListener('click', () => {
+        if (!statisticsData) return;
+        modal.classList.remove('hidden');
+        renderStatistics();
+        renderCharts();
+    });
+}
+
+function closeModal() {
+    if (modal) modal.classList.add('hidden');
+    Object.values(charts).forEach(c => { if (c) c.destroy(); });
+    charts = {};
+}
+
+if (modalClose)    modalClose.addEventListener('click', closeModal);
+if (modalBackdrop) modalBackdrop.addEventListener('click', closeModal);
+
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) closeModal();
+    if (modal && !modal.classList.contains('hidden')) {
+        if (e.key === 'ArrowLeft')  goCard(currentCardIndex - 1);
+        if (e.key === 'ArrowRight') goCard(currentCardIndex + 1);
+    }
+});
+
+if (btnPrevCard) btnPrevCard.addEventListener('click', () => goCard(currentCardIndex - 1));
+if (btnNextCard) btnNextCard.addEventListener('click', () => goCard(currentCardIndex + 1));
+
+cardDots.forEach(dot => {
+    dot.addEventListener('click', () => goCard(parseInt(dot.dataset.index, 10)));
+});
+
+function goCard(idx) {
+    if (idx < 0 || idx >= TOTAL_CARDS) return;
+    currentCardIndex = idx;
+    if (cardsContainer) {
+        cardsContainer.style.transform = `translateX(-${idx * 100}%)`;
+    }
+    cardDots.forEach((dot, i) => {
+        dot.classList.toggle('bg-indigo-500', i === idx);
+        dot.classList.toggle('bg-gray-300',   i !== idx);
+    });
+}
+
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+}
+
+function renderStatistics() {
+    if (!statisticsData) return;
+    const { summary, fundamentalDiagram } = statisticsData;
+
+    setText('stat-avg-speed',  summary.avgSpeed.toFixed(2));
+    setText('stat-congestion', (summary.avgCongestionRate * 100).toFixed(1) + '%');
+
+    setText('stat-queue-w', summary.avgQueueW.toFixed(2));
+    setText('stat-queue-e', summary.avgQueueE.toFixed(2));
+    setText('stat-queue-s', summary.avgQueueS.toFixed(2));
+
+    setText('stat-thr-main',   summary.throughputMain);
+    setText('stat-thr-sec',    summary.throughputSec);
+    setText('stat-thr-main-h', summary.throughputMainPerHour);
+    setText('stat-thr-sec-h',  summary.throughputSecPerHour);
+
+    setText('stat-wait-total', summary.avgWaitTotal.toFixed(1) + ' с');
+
+    setText('stat-total-created', summary.totalCreated);
+    setText('stat-total-exited',  summary.totalExited);
+    setText('stat-final-system',  summary.finalInSystem);
+
+    setText('stat-density',  fundamentalDiagram.density.toFixed(4));
+    setText('stat-flow',     fundamentalDiagram.flow.toFixed(3));
+    setText('stat-fd-speed', fundamentalDiagram.speed.toFixed(2));
+}
+
+function renderCharts() {
+    if (!statisticsData) return;
+    Object.values(charts).forEach(c => { if (c) c.destroy(); });
+    charts = {};
+
+    const { perStep, summary, manoeuvres, fundamentalDiagram } = statisticsData;
+    const steps = perStep.speed.map((_, i) => i);
+
+    // 1. Скорость
+    drawLine('chart-speed', steps, [
+        { label: 'v̄', data: perStep.speed, color: 'rgb(59,130,246)' },
+    ], { yTitle: 'клеток/шаг' });
+
+    // 2. Заторы
+    drawLine('chart-congestion', steps, [
+        { label: 'доля v=0', data: perStep.congestionRate, color: 'rgb(239,68,68)' },
+    ], { yTitle: 'доля', yMax: 1 });
+
+    // 3. Очереди по плечам
+    drawLine('chart-queues', steps, [
+        { label: 'W', data: perStep.queueW, color: 'rgb(234,179,8)' },
+        { label: 'E', data: perStep.queueE, color: 'rgb(245,158,11)' },
+        { label: 'S', data: perStep.queueS, color: 'rgb(249,115,22)' },
+    ], { yTitle: 'машин' });
+
+    // 4. Пропускная способность по фазам
+    drawLine('chart-throughput', steps, [
+        { label: 'MAIN', data: perStep.throughputMain, color: 'rgb(34,197,94)' },
+        { label: 'SEC',  data: perStep.throughputSec,  color: 'rgb(16,185,129)' },
+    ], { yTitle: 'пересечений (нараст.)' });
+
+    // 5. Время ожидания (бары по плечам)
+    drawBar('chart-wait',
+        ['W', 'E', 'S', 'Среднее'],
+        [summary.avgWaitW, summary.avgWaitE, summary.avgWaitS, summary.avgWaitTotal],
+        ['rgb(168,85,247)', 'rgb(217,70,239)', 'rgb(236,72,153)', 'rgb(124,58,237)'],
+        { yTitle: 'шагов = секунд' }
+    );
+
+    // 6. Баланс
+    drawLine('chart-balance', steps, [
+        { label: 'Создано', data: perStep.created,  color: 'rgb(20,184,166)' },
+        { label: 'Выехало', data: perStep.exited,   color: 'rgb(6,182,212)'  },
+        { label: 'В системе', data: perStep.inSystem, color: 'rgb(59,130,246)' },
+    ], { yTitle: 'машин' });
+
+    // 7. Манёвры
+    const labels = ['W→E', 'W→S', 'E→W', 'E→S', 'S→W', 'S→E'];
+    const values = labels.map(k => manoeuvres[k] || 0);
+    drawBar('chart-manoeuvres', labels, values,
+        ['rgb(217,70,239)', 'rgb(192,38,211)', 'rgb(168,85,247)',
+            'rgb(147,51,234)', 'rgb(126,34,206)', 'rgb(107,33,168)'],
+        { yTitle: 'машин' }
+    );
+
+    // 8. Фундаментальная диаграмма (точка + теоретический колокол)
+    drawFundamental('chart-fundamental', fundamentalDiagram, summary.vMax);
+}
+
+function drawLine(canvasId, steps, series, opts = {}) {
+    const ctx = document.getElementById(canvasId);
+    if (!ctx) return;
+    charts[canvasId] = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: steps,
+            datasets: series.map(s => ({
+                label: s.label,
+                data: s.data,
+                borderColor: s.color,
+                backgroundColor: s.color.replace('rgb', 'rgba').replace(')', ',0.10)'),
+                borderWidth: 2,
+                tension: 0.25,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+            })),
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            scales: {
+                x: { title: { display: true, text: 'шаг' }, grid: { color: 'rgba(0,0,0,0.05)' } },
+                y: {
+                    title: { display: !!opts.yTitle, text: opts.yTitle || '' },
+                    beginAtZero: true,
+                    max: opts.yMax,
+                    grid: { color: 'rgba(0,0,0,0.05)' },
+                },
+            },
+            plugins: { legend: { display: series.length > 1, position: 'bottom' } },
+        },
+    });
+}
+
+function drawBar(canvasId, labels, values, colors, opts = {}) {
+    const ctx = document.getElementById(canvasId);
+    if (!ctx) return;
+    charts[canvasId] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [{
+                data: values,
+                backgroundColor: colors,
+                borderColor: colors,
+                borderWidth: 1,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    title: { display: !!opts.yTitle, text: opts.yTitle || '' },
+                    beginAtZero: true,
+                    grid: { color: 'rgba(0,0,0,0.05)' },
+                },
+                x: { grid: { display: false } },
+            },
+            plugins: { legend: { display: false } },
+        },
+    });
+}
+
+function drawFundamental(canvasId, fd, vMax) {
+    const ctx = document.getElementById(canvasId);
+    if (!ctx) return;
+
+    // Теоретическая огибающая: J = ρ·v̄(ρ); упрощённо берём
+    // J = min(ρ·vMax, (1-ρ)·vMax) — треугольная аппроксимация.
+    const curve = [];
+    for (let r = 0; r <= 1.001; r += 0.02) {
+        curve.push({ x: r, y: Math.min(r * vMax, (1 - r) * vMax) });
+    }
+
+    charts[canvasId] = new Chart(ctx, {
+        type: 'scatter',
+        data: {
+            datasets: [
+                {
+                    label: 'Теор. огибающая',
+                    data: curve,
+                    showLine: true,
+                    borderColor: 'rgba(244,114,182,0.5)',
+                    backgroundColor: 'transparent',
+                    pointRadius: 0,
+                    borderDash: [4, 4],
+                },
+                {
+                    label: 'Текущая симуляция',
+                    data: [{ x: fd.density, y: fd.flow }],
+                    backgroundColor: 'rgb(225,29,72)',
+                    pointRadius: 8,
+                    pointHoverRadius: 10,
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: { title: { display: true, text: 'плотность ρ' }, beginAtZero: true, max: 1 },
+                y: { title: { display: true, text: 'поток J' },     beginAtZero: true },
+            },
+            plugins: { legend: { position: 'bottom' } },
+        },
+    });
+}

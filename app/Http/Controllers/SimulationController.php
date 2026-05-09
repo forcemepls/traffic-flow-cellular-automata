@@ -7,6 +7,7 @@ use App\Services\ExtendedNagelService;
 use App\Services\NagelSchreckenbergService;
 use App\Services\StatisticsService;
 use App\Services\TJunctionService;
+use App\Services\TJunctionStatisticsService;
 
 class SimulationController extends Controller
 {
@@ -72,9 +73,19 @@ class SimulationController extends Controller
                 $data['lambdaS']
             );
 
+            $statistics = (new TJunctionStatisticsService())->calculate(
+                $history,
+                $roadLength,
+                $vMax,
+                [
+                    'main' => $data['tPhaseMain'],
+                    'sec'  => $data['tPhaseSec'],
+                ]
+            );
+
             return response()->json([
                 'history'    => $history,
-                'statistics' => [], // заглушка — статистика будет на Шаге 7
+                'statistics' => $statistics,
             ]);
         }
 

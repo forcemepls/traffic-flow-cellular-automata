@@ -411,7 +411,7 @@ class TJunctionService
                 continue;
             }
             if ($car['dir'] === self::DIR_IN) {
-                $intentions[$car['id']] = $this->planInbound($car, $grid, $state['phase'], $roadLength, $vMax, $p);
+                $intentions[$car['id']] = $this->planInbound($car, $grid, $state['phase'], $roadLength, $vMax, $p, $machinesAfterLC);
             } else {
                 $intentions[$car['id']] = $this->planOutbound($car, $grid, $roadLength, $vMax, $p);
             }
@@ -599,7 +599,8 @@ class TJunctionService
     // ---------------------------------------------------------------
 
     private function planInbound(
-        array $car, array $grid, string $phase, int $roadLength, int $vMax, float $p
+        array $car, array $grid, string $phase, int $roadLength, int $vMax, float $p,
+        array $machinesAfterLC = []
     ): array {
         $pos            = $car['position'];
         $lane           = $car['lane'] ?? 0;
@@ -631,6 +632,15 @@ class TJunctionService
         // gap до стоп-линии (если манёвр запрещён — стоп-линия в позиции roadLength-1)
         $gapEffective = $gapToLeader;
         if (!$allowed) {
+            $gapEffective = min($gapEffective, $distToStopLine);
+        }
+
+        // Анти-коллизия с машинами, уже находящимися в узле и пришедшими
+        // с того же входа (тот же arm и для W/E — та же поворотная/прямая
+        // полоса). Лидер в узле = виртуальное препятствие за стоп-линией,
+        // gap до него = distToStopLine + 1 (одна клетка узла «за линией»).
+        // Это не даёт второму въехать в ту же траекторию узла.
+        if ($allowed && $this->hasLeaderInJunction($machinesAfterLC, $car, $effectiveGoal)) {
             $gapEffective = min($gapEffective, $distToStopLine);
         }
 
@@ -779,6 +789,54 @@ class TJunctionService
     // Конфликты: несколько машин одновременно въезжают в узел
     // ---------------------------------------------------------------
 
+    /**
+     * Есть ли в узле машина, пришедшая с того же входа и идущая по
+     * пересекающейся траектории. Используется как виртуальный лидер
+     * для anti-collision: пока «свой» в узле — за стоп-линию не лезем.
+     *
+     * Совпадение трассы:
+     *   - тот же arm источника;
+     *   - для W/E — та же полоса (LANE_THROUGH или LANE_TURN), это
+     *     гарантирует, что траектории совпадают (одна стрелочная секция);
+     *   - для S — однополосное, достаточно arm.
+     */
+    private function hasLeaderInJunction(array $machines, array $car, string $effectiveGoal): bool
+    {
+        foreach ($machines as $other) {
+            if (empty($other['inJunction'])) continue;
+            if ($other['arm'] !== $car['arm']) continue;
+            if ($car['arm'] !== self::ARM_S) {
+                if (($other['lane'] ?? 0) !== ($car['lane'] ?? 0)) continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Ключ трассы внутри узла: arm источника + lane (для W/E).
+     * Для S полоса не различается.
+     */
+    private function trackKey(string $arm, int $lane): string
+    {
+        return $arm === self::ARM_S ? $arm : ($arm . ':' . $lane);
+    }
+
+    /**
+     * Карта занятых трасс узла: [trackKey => true] по машинам, у которых
+     * inJunction=true.
+     */
+    private function findOccupiedTracks(array $machines): array
+    {
+        $occupied = [];
+        foreach ($machines as $car) {
+            if (empty($car['inJunction'])) continue;
+            $key = $this->trackKey($car['arm'], $car['lane'] ?? 0);
+            $occupied[$key] = true;
+        }
+        return $occupied;
+    }
+
     private function resolveJunctionConflicts(array $intentions, array $machines): array
     {
         // Машины, которые в этот шаг хотят оказаться в узле
@@ -797,15 +855,50 @@ class TJunctionService
             }
         }
 
-        if (count($entering) <= 1) return $intentions;
+        if (count($entering) <= 1 && empty($this->findOccupiedTracks($machines))) {
+            return $intentions;
+        }
+
+        $blocked = [];
+
+        // Конфликт 0: машина уже в узле на той же трассе (arm+lane для W/E,
+        // arm для S). Новый въезд по этой трассе блокируем.
+        $occupiedTracks = $this->findOccupiedTracks($machines);
+        foreach ($entering as $id => $e) {
+            $key = $this->trackKey($e['arm'], $machines[$id]['lane'] ?? 0);
+            if (isset($occupiedTracks[$key])) {
+                $blocked[$id] = true;
+            }
+        }
+
+        // Конфликт 0b: одновременно входят несколько с одного arm+lane —
+        // пропускаем только самого «первого» (наибольшая position на DIR_IN,
+        // т.е. кто ближе к стоп-линии; при равенстве — меньший id).
+        $byTrack = [];
+        foreach ($entering as $id => $e) {
+            if (isset($blocked[$id])) continue;
+            $key = $this->trackKey($e['arm'], $machines[$id]['lane'] ?? 0);
+            $byTrack[$key][] = $id;
+        }
+        foreach ($byTrack as $ids) {
+            if (count($ids) <= 1) continue;
+            usort($ids, function ($a, $b) use ($machines) {
+                $pa = $machines[$a]['position'] ?? 0;
+                $pb = $machines[$b]['position'] ?? 0;
+                if ($pa !== $pb) return $pb <=> $pa; // ближе к стоп-линии = выше position
+                return $a <=> $b;
+            });
+            array_shift($ids);
+            foreach ($ids as $id) $blocked[$id] = true;
+        }
 
         // Конфликт 1: две машины хотят на одно и то же выездное плечо (одна целевая клетка)
         $byGoal = [];
         foreach ($entering as $id => $e) {
+            if (isset($blocked[$id])) continue;
             $byGoal[$e['goal']][] = $id;
         }
 
-        $blocked = [];
         foreach ($byGoal as $goal => $ids) {
             if (count($ids) > 1) {
                 // Приоритет — кто дольше ждёт (меньший waitedAt), при равенстве — меньший id

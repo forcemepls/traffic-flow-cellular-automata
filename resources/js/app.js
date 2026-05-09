@@ -201,30 +201,6 @@ function drawCarWithLabel(x, y, rotationAngle, carId, carSpeed) {
     labelText.rotation(-rotationAngle);
     carGroup.add(labelText);
 
-    // Индикатор скорости (маленькая полоска)
-    if (carSpeed > 0) {
-        const speedIndicator = new Konva.Rect({
-            x: -fixedCellSize / 2 - 4,
-            y: -2,
-            width: 3,
-            height: 4,
-            fill: '#22C55E', // green
-            cornerRadius: 1,
-        });
-        carGroup.add(speedIndicator);
-    } else {
-        // Красный индикатор если стоит
-        const stopIndicator = new Konva.Rect({
-            x: -fixedCellSize / 2 - 4,
-            y: -2,
-            width: 3,
-            height: 4,
-            fill: '#EF4444', // red
-            cornerRadius: 1,
-        });
-        carGroup.add(stopIndicator);
-    }
-
     return carGroup;
 }
 

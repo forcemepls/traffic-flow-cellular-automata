@@ -727,9 +727,7 @@ class TJunctionService
     private function planExitJunction(array $car, array $grid, array $exitWillBeFree = []): array
     {
         $targetArm  = $car['goal'];
-        // Выезжающая машина встаёт в правую полосу (правостороннее
-        // движение). На S — единственная полоса.
-        $targetLane = ($targetArm === self::ARM_S) ? self::LANE_SINGLE : self::LANE_THROUGH;
+        $targetLane = $this->pickExitLane($car['arm'], $targetArm, $car['lane'] ?? 0);
 
         $willBeFree = $exitWillBeFree[$targetArm][$targetLane]
             ?? !isset($grid[$targetArm][self::DIR_OUT][$targetLane][0]);
@@ -756,6 +754,25 @@ class TJunctionService
             'speed'            => 0,
             'junctionProgress' => $car['junctionProgress'] ?? 0.5,
         ];
+    }
+
+    /**
+     * Выбор полосы на DIR_OUT целевого плеча.
+     *
+     * lane=0 — правая по ходу (THROUGH, у внешнего бордюра).
+     * lane=1 — левая (TURN, у разделительной).
+     *
+     * При выходе из узла машина встаёт в правую (lane=0) полосу
+     * целевого плеча — это правостороннее движение и одновременно
+     * обеспечивает совпадение Y при сквозном проезде через узел
+     * (W IN THROUGH → E DIR_OUT THROUGH — обе у бордюра).
+     */
+    private function pickExitLane(string $fromArm, string $toArm, int $fromLane): int
+    {
+        if ($toArm === self::ARM_S) {
+            return self::LANE_SINGLE;
+        }
+        return self::LANE_THROUGH;
     }
 
     // ---------------------------------------------------------------

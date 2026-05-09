@@ -84,16 +84,18 @@ stage.add(layer);
 // S-плечо однополосное: x = -LW/2 — DIR_OUT, x = +LW/2 — DIR_IN.
 // ─────────────────────────────────────────────
 
-const JW = LANE_W * 4;  // ширина и высота узла (квадрат)
+const JW = LANE_W * 4;  // ширина и высота узла (квадрат), а также ширина S-плеча
 const OX = 0;
 const OY = 0;
 
 // Верх/низ горизонтальных плеч и верх вертикального S
 const ARM_TOP    = OY - JW/2;
 const ARM_BOTTOM = OY + JW/2;
-const S_TOP      = OY + JW/2;   // S стыкуется к низу узла
-const S_LEFT     = OX - LANE_W; // S — две полосы шириной 2*LANE_W
-const S_RIGHT    = OX + LANE_W;
+const S_TOP      = OY + JW/2;
+// S — той же ширины что W/E (JW), реальная проезжая часть — две
+// центральные полосы, отделённые от обочин разделителем x=0.
+const S_LEFT     = OX - JW/2;
+const S_RIGHT    = OX + JW/2;
 
 function drawRoad(L) {
     roadLayer.destroyChildren();
@@ -120,18 +122,20 @@ function drawRoad(L) {
     }));
     roadLayer.add(new Konva.Rect({
         x: S_LEFT, y: S_TOP,
-        width: S_RIGHT - S_LEFT, height: armLen,
+        width: JW, height: armLen,
         fill: COLOR.asphalt,
     }));
 
-    // ─── Разметка W/E (только вне узла) ───
+    // ─── Разметка W/E ───
+    // Сплошная между встречными — через ВСЮ ширину (включая узел),
+    // чтобы не было «заворотов» в углах узла.
+    // Пунктиры между попутными — только вне узла.
     const dashOpts  = { stroke: COLOR.marking, strokeWidth: 1.5, dash: [10, 10], opacity: 0.6 };
     const solidOpts = { stroke: COLOR.marking, strokeWidth: 2.0, opacity: 0.85 };
 
     [
-        { y: OY - LANE_W, opts: dashOpts  }, // между OUT THROUGH и OUT TURN
-        { y: OY,          opts: solidOpts }, // сплошная между встречными
-        { y: OY + LANE_W, opts: dashOpts  }, // между IN TURN и IN THROUGH
+        { y: OY - LANE_W, opts: dashOpts }, // между OUT THROUGH и OUT TURN
+        { y: OY + LANE_W, opts: dashOpts }, // между IN TURN и IN THROUGH
     ].forEach(({ y, opts }) => {
         roadLayer.add(new Konva.Line({
             points: [OX - JW/2 - armLen, y, OX - JW/2, y], ...opts,
@@ -140,58 +144,41 @@ function drawRoad(L) {
             points: [OX + JW/2, y, OX + JW/2 + armLen, y], ...opts,
         }));
     });
+    // Сплошная y=0 — на всю длину, через узел
+    roadLayer.add(new Konva.Line({
+        points: [OX - JW/2 - armLen, OY, OX + JW/2 + armLen, OY], ...solidOpts,
+    }));
 
-    // S-плечо: сплошная между встречными
+    // ─── Разметка S ───
+    // Только одна сплошная между встречными направлениями.
     roadLayer.add(new Konva.Line({
         points: [OX, S_TOP, OX, S_TOP + armLen], ...solidOpts,
     }));
 
-    // ─── Бордюры (внешние границы плеч; внутри узла нет) ───
+    // ─── Бордюры внешние ───
     const curbOpts = { stroke: COLOR.curb, strokeWidth: 2 };
-    // W: верх и низ
+    // W
     roadLayer.add(new Konva.Line({ points: [OX - JW/2 - armLen, ARM_TOP,    OX - JW/2, ARM_TOP    ], ...curbOpts }));
     roadLayer.add(new Konva.Line({ points: [OX - JW/2 - armLen, ARM_BOTTOM, OX - JW/2, ARM_BOTTOM ], ...curbOpts }));
-    // E: верх и низ
+    // E
     roadLayer.add(new Konva.Line({ points: [OX + JW/2, ARM_TOP,    OX + JW/2 + armLen, ARM_TOP    ], ...curbOpts }));
     roadLayer.add(new Konva.Line({ points: [OX + JW/2, ARM_BOTTOM, OX + JW/2 + armLen, ARM_BOTTOM ], ...curbOpts }));
-    // S: левый и правый — рисуются ниже скруглений (см. угловые скругления)
+    // S — ровно от низа узла до конца плеча, по обеим внешним сторонам
+    roadLayer.add(new Konva.Line({ points: [S_LEFT,  S_TOP, S_LEFT,  S_TOP + armLen], ...curbOpts }));
+    roadLayer.add(new Konva.Line({ points: [S_RIGHT, S_TOP, S_RIGHT, S_TOP + armLen], ...curbOpts }));
 
     // ─── Бордюры узла ───
-    // Сверху узла (там где W и E встречаются) — одна прямая поверх узла,
-    // поскольку выше асфальта нет.
+    // Сверху узла (W и E встречаются) — одна прямая поверх узла,
+    // потому что выше асфальта нет.
     roadLayer.add(new Konva.Line({
         points: [OX - JW/2, ARM_TOP, OX + JW/2, ARM_TOP], ...curbOpts,
     }));
-    // Снизу узла — бордюр идёт от внешнего края W до левого края S и от
-    // правого края S до внешнего края E (середина — стык с S, открыта).
-    roadLayer.add(new Konva.Line({
-        points: [OX - JW/2, ARM_BOTTOM, S_LEFT, ARM_BOTTOM], ...curbOpts,
-    }));
-    roadLayer.add(new Konva.Line({
-        points: [S_RIGHT, ARM_BOTTOM, OX + JW/2, ARM_BOTTOM], ...curbOpts,
-    }));
-    // Бордюры S — на всю длину плеча
-    roadLayer.add(new Konva.Line({
-        points: [S_LEFT, ARM_BOTTOM, S_LEFT, S_TOP + armLen], ...curbOpts,
-    }));
-    roadLayer.add(new Konva.Line({
-        points: [S_RIGHT, ARM_BOTTOM, S_RIGHT, S_TOP + armLen], ...curbOpts,
-    }));
+    // Снизу узла бордюра нет — узел открыт в сторону S по всей ширине.
 
-    // ─── Стоп-линии перед узлом ───
-    const stopOpts = { stroke: COLOR.marking, strokeWidth: 3, opacity: 0.9 };
-    // W IN — на x = -JW/2, по обеим IN-полосам (y от 0 до +JW/2)
-    roadLayer.add(new Konva.Line({
-        points: [OX - JW/2, OY, OX - JW/2, OY + JW/2], ...stopOpts,
-    }));
-    // E IN — на x = +JW/2, по обеим IN-полосам (y от -JW/2 до 0)
-    roadLayer.add(new Konva.Line({
-        points: [OX + JW/2, OY - JW/2, OX + JW/2, OY], ...stopOpts,
-    }));
-    // S IN — на y = S_TOP, по правой полосе (x от 0 до +LANE_W)
-    roadLayer.add(new Konva.Line({
-        points: [OX, S_TOP, S_RIGHT, S_TOP], ...stopOpts,
-    }));
+    // Стоп-линии не рисуем — они образуют «уголки» со сплошной
+    // продольной разметкой. Логически их роль выполняет позиция
+    // машины: на position = roadLength-1 машина останавливается
+    // перед узлом если фаза не разрешает её манёвр.
 
     // ─── Подписи плечей ───
     const labelOpts = { fontSize: 14, fontStyle: 'bold', fill: '#AAA' };
@@ -206,19 +193,32 @@ function drawRoad(L) {
 // Перевод (arm, dir, lane, position) → (x, y, angle)
 // Правостороннее движение
 //
-// Для W/E: lane 0 — LANE_THROUGH (внешняя, у бордюра, для прямого
-// проезда), lane 1 — LANE_TURN (внутренняя, у разделительной полосы,
-// для поворота на S).
-// На S — единственная полоса (lane 0).
+// Семантика lane:
+//   на DIR_IN W/E:  lane=0 (THROUGH) — правая по ходу (у внешнего бордюра),
+//                   lane=1 (TURN)    — левая по ходу (у разделительной y=0).
+//   на DIR_OUT W/E: lane=0 — правая по ходу (у бордюра),
+//                   lane=1 — левая (у разделительной).
+// На S — единственная полоса (lane=0).
+//
+// Эта геометрия даёт совпадение Y при прямом проезде через узел:
+// машина W→E с правой полосы W (нижняя на канвасе) выходит на правую
+// полосу E (тоже нижняя) — проезд выглядит ровным.
+//
+// Замечание для диплома: разделение «полоса = манёвр» (TURN-полоса
+// только для поворота на S) — модельное упрощение для разделения
+// потоков. По ПДД правый поворот возможен и с правой (THROUGH) полосы,
+// но в нашей модели каждая полоса жёстко связана со своей фазой
+// светофора (стрелочные секции), что и требует искусственного
+// разделения.
 // ─────────────────────────────────────────────
 
 function carXY(arm, dir, pos, L, lane = 0) {
     const half = LANE_W / 2;
 
     if (arm === 'W') {
-        // y разделительной = 0. Сверху DIR_OUT (-2..0), снизу DIR_IN (0..+2).
         if (dir === 'in') {
-            // едет вправо. THROUGH (lane 0) у бордюра снизу, TURN (lane 1) у разделительной.
+            // едет вправо. THROUGH (правая по ходу) — у нижнего бордюра,
+            // TURN — у разделительной.
             const y = (lane === 1) ? OY + half : OY + 3 * half;
             return {
                 x: OX - JW/2 - (L - 1 - pos) * CELL - half,
@@ -226,7 +226,7 @@ function carXY(arm, dir, pos, L, lane = 0) {
                 angle: 0,
             };
         } else {
-            // DIR_OUT, едет влево. THROUGH у бордюра сверху, TURN у разделительной.
+            // DIR_OUT, едет влево. Правая по ходу — у верхнего бордюра.
             const y = (lane === 1) ? OY - half : OY - 3 * half;
             return {
                 x: OX - JW/2 - pos * CELL - half,
@@ -238,7 +238,8 @@ function carXY(arm, dir, pos, L, lane = 0) {
 
     if (arm === 'E') {
         if (dir === 'in') {
-            // едет влево. THROUGH у бордюра сверху, TURN у разделительной.
+            // едет влево. THROUGH (правая по ходу) — у верхнего бордюра,
+            // TURN — у разделительной.
             const y = (lane === 1) ? OY - half : OY - 3 * half;
             return {
                 x: OX + JW/2 + (L - 1 - pos) * CELL + half,
@@ -246,7 +247,7 @@ function carXY(arm, dir, pos, L, lane = 0) {
                 angle: 180,
             };
         } else {
-            // DIR_OUT, едет вправо. THROUGH у бордюра снизу, TURN у разделительной.
+            // DIR_OUT, едет вправо. Правая по ходу — у нижнего бордюра.
             const y = (lane === 1) ? OY + half : OY + 3 * half;
             return {
                 x: OX + JW/2 + pos * CELL + half,
@@ -256,16 +257,14 @@ function carXY(arm, dir, pos, L, lane = 0) {
         }
     }
 
-    // S-плечо (одна полоса в каждом направлении)
+    // S-плечо. Две внутренние полосы по центру (±LANE_W/2).
     if (dir === 'in') {
-        // S→к узлу: едет вверх, правая полоса
         return {
             x: OX + half,
             y: S_TOP + (L - 1 - pos) * CELL + half,
             angle: 270,
         };
     } else {
-        // S←от узла: едет вниз, левая полоса
         return {
             x: OX - half,
             y: S_TOP + pos * CELL + half,
@@ -559,17 +558,43 @@ function positionAtT(carA, carB, t, L) {
     }
 
     // Обе на полосах — учитываем возможное перестроение между шагами.
-    // carA.lane → carB.lane интерполируется параллельно продольному
-    // движению — машина «съезжает» по диагонали на соседнюю полосу.
+    // Угол корпуса считаем по производной траектории (направление к
+    // точке чуть-чуть в будущем), как в кольцевой двухполосной модели.
+    // Это даёт реалистичный наклон при диагональном съезде на соседнюю
+    // полосу.
     const a = carXY(carA.arm, carA.dir, carA.position, L, carA.lane ?? 0);
     const b = carXY(carB.arm, carB.dir, carB.position, L, carB.lane ?? 0);
     const x = a.x + (b.x - a.x) * t;
     const y = a.y + (b.y - a.y) * t;
 
+    // Базовый «продольный» угол — линейная интерполяция a.angle/b.angle
+    // (на одном плече они совпадают).
     let da = b.angle - a.angle;
     if (da > 180)  da -= 360;
     if (da < -180) da += 360;
-    const angle = a.angle + da * t;
+    let angle = a.angle + da * t;
+
+    // Поправка на перестроение: если у машины менялась полоса,
+    // её движение идёт по диагонали. Корректируем угол по фактическому
+    // направлению (a → b).
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    if (Math.abs(dy) > 0.5) {
+        // Есть боковое смещение — берём угол по реальному вектору.
+        const realAngle = Math.atan2(dy, dx) * 180 / Math.PI;
+        // Смешиваем плавно: в начале/конце шага — продольный угол,
+        // в середине — реальный диагональный. Это даёт «вильнул и
+        // выровнялся», без рывков на стыках шагов.
+        const blend = 4 * t * (1 - t); // 0 на концах, 1 в середине
+        let dRA = realAngle - angle;
+        if (dRA > 180)  dRA -= 360;
+        if (dRA < -180) dRA += 360;
+        // Ограничим максимальный наклон корпуса при перестроении (~20°),
+        // чтобы машина не разворачивалась слишком резко.
+        const MAX_TILT = 20;
+        dRA = Math.max(-MAX_TILT, Math.min(MAX_TILT, dRA));
+        angle += dRA * blend;
+    }
 
     return { x, y, angle };
 }
@@ -667,7 +692,7 @@ function centerScene(L) {
     stage.width(w);
     stage.height(h);
     const totalW = L * CELL * 2 + JW + 60;
-    const totalH = L * CELL     + JW + 60; // высота W/E плеч теперь JW
+    const totalH = L * CELL     + JW + 60;
     const scale  = Math.min(w / totalW, h / totalH, 1);
     stage.scale({ x: scale, y: scale });
     stage.position({ x: w / 2, y: h / 2 });

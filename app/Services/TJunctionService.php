@@ -9,24 +9,31 @@ use App\Support\NaSchRulesTrait;
  *
  * Геометрия (правостороннее движение):
  *
- *                               W-плечо                E-плечо
- *   DIR_OUT (← от узла, к западу) ─── нижняя полоса ─── DIR_IN (← к узлу с востока)
- *   DIR_IN  (→ к узлу с запада)   ─── верхняя полоса ─── DIR_OUT (→ от узла, к востоку)
- *                                       │ узел │
- *                                       │      │
- *                            DIR_IN  ── │      │ ── DIR_OUT
- *                            (↑ к узлу) │      │ (↓ от узла)
- *                                       │      │
- *                                     S-плечо
+ *   W-плечо (4 полосы)                        E-плечо (4 полосы)
+ *   ─── DIR_OUT lane THROUGH ──────────────── DIR_OUT lane THROUGH ───
+ *   ─── DIR_OUT lane TURN  ────────────────── DIR_OUT lane TURN ──────
+ *   ═══ (сплошная разметка между встречными) ════════════════════════
+ *   ─── DIR_IN  lane TURN  (для поворота на S) ── DIR_IN lane TURN ───
+ *   ─── DIR_IN  lane THROUGH (для прямого W↔E) ── DIR_IN lane THROUGH ─
+ *                                  │  узел  │
+ *                                  │ 4×2 LW │
+ *                       DIR_IN  ── │        │ ── DIR_OUT
+ *                       (↑ к узлу) │        │ (↓ от узла)
+ *                                  │        │
+ *                                S-плечо (1+1)
  *
- * Светофор — 2 фазы:
- *   main: разрешает W→E, E→W
- *   sec : разрешает S→W, S→E, W→S, E→S
+ * Полоса жёстко связана с фазой светофора (стрелочные секции):
+ *   main: разрешает W→E, E→W (только машинам на LANE_THROUGH W/E)
+ *   sec : разрешает S→W, S→E, W→S, E→S (на W/E — только LANE_TURN)
+ *
+ * Если машина не успела перестроиться к стоп-линии, её манёвр
+ * корректируется по факту полосы (правая → прямо, левая → на S),
+ * как в реальной дорожной разметке.
  *
  * Конфликты в узле во второстепенной фазе:
- *   W→S vs S→E   — пересекаются (W→S — левый поворот, S→E — выезд направо).
- *                  Приоритет — кто первым встал в очередь у узла.
- *   E→S vs S→W   — симметрично.
+ *   W→S vs S→E — пересекаются. Приоритет по waitedAt.
+ *   E→S vs S→W — симметрично.
+ *   W→S vs E→S — обе целят в S DIR_OUT[0] (resolveJunctionConflicts по goal).
  */
 class TJunctionService
 {
@@ -40,6 +47,37 @@ class TJunctionService
     const ARM_W = 'W';
     const ARM_E = 'E';
     const ARM_S = 'S';
+
+    // -------------------------------------------------------
+    // Полосы на плечах W и E (S остаётся однополосным).
+    //
+    // На W/E DIR_IN и DIR_OUT — двухполосные:
+    //   LANE_THROUGH = 0  — внешняя (правая по ходу), для прямого проезда W↔E
+    //   LANE_TURN    = 1  — внутренняя (левая по ходу), для поворота на S
+    //
+    // Полоса жёстко привязана к фазе светофора (как стрелочные секции):
+    //   PHASE_MAIN — на W/E едет только LANE_THROUGH (W→E, E→W).
+    //   PHASE_SEC  — на W/E едет только LANE_TURN (W→S, E→S),
+    //                плюс всё плечо S (там полосы нет).
+    //
+    // Маршрут (goal) назначается при спавне, полоса — случайная.
+    // Перестроение — асимметричное (Chowdhury–Wolf–Schreckenberg 1997 +
+    // Rickert et al. 1996, но с императивом маршрута):
+    // машина каждый шаг пытается уйти на «свою» полосу, если не успела
+    // до стоп-линии — goal корректируется по факту полосы (правая →
+    // прямо, левая → поворот). Это эквивалент реальной разметки:
+    // выехал на поворотную — обязан повернуть, и наоборот.
+    // -------------------------------------------------------
+    const LANE_THROUGH = 0;  // правая, для W↔E
+    const LANE_TURN    = 1;  // левая, для поворота на S
+    const LANE_SINGLE  = 0;  // S-плечо: всегда 0
+
+    // Безопасный gap для перестроения. Стандартные правила
+    // Чоудхури-Вольфа-Шрекенберга: gap_other_ahead ≥ speed,
+    // gap_other_back ≥ vMax другой машины. У нас vMax общий —
+    // используем его. Возле стоп-линии (≤ AGGRESSIVE_DIST клеток)
+    // требования смягчаются, иначе машина не успеет перестроиться.
+    const LANE_CHANGE_AGGRESSIVE_DIST = 6;
 
     // Распределение целей на въездах
     const GOAL_DISTRIBUTION = [
@@ -204,15 +242,20 @@ class TJunctionService
         foreach ($lambdas as $arm => $lambda) {
             if ($lambda <= 0) continue;
 
-            // Не спавним, если въездная зона ещё занята предыдущей машиной
-            if ($this->isSpawnZoneBusy($state['machines'], $arm)) continue;
-
             // Пуассоновский спавн: за шаг (1 секунду) вероятность p = λ/60
             $prob = min(1.0, $lambda / 60.0);
             if ((mt_rand() / mt_getrandmax()) >= $prob) continue;
 
             $goal = $this->pickGoal($arm);
-            $state['queues'][$arm][] = $this->makeCar($state['nextId'], $arm, $goal);
+            $lane = ($arm === self::ARM_S)
+                ? self::LANE_SINGLE
+                : (mt_rand(0, 1) === 0 ? self::LANE_THROUGH : self::LANE_TURN);
+
+            // Не спавним, если въездная зона нужной полосы ещё занята
+            // предыдущей машиной (на других полосах — без разницы).
+            if ($this->isSpawnZoneBusy($state['machines'], $arm, $lane)) continue;
+
+            $state['queues'][$arm][] = $this->makeCar($state['nextId'], $arm, $goal, $lane);
             $state['nextId']++;
             $state['spawned']++;
         }
@@ -221,15 +264,20 @@ class TJunctionService
 
     /**
      * Зона перед въездом занята, если в первых SPAWN_MIN_GAP клетках
-     * DIR_IN уже стоит/едет машина. Это страхует от спавна "впритык"
-     * и даёт лидеру разогнаться без помех от хвоста.
+     * DIR_IN на нужной полосе уже стоит/едет машина. Это страхует от
+     * спавна "впритык" и даёт лидеру разогнаться без помех от хвоста.
+     *
+     * Для W/E проверка ведётся по конкретной полосе (а не по плечу
+     * целиком), иначе на двухполосном въезде поток падает в 2 раза.
+     * Для S — единственная полоса.
      */
-    private function isSpawnZoneBusy(array $machines, string $arm): bool
+    private function isSpawnZoneBusy(array $machines, string $arm, int $lane): bool
     {
         foreach ($machines as $car) {
             if ($car['inJunction']) continue;
             if ($car['arm'] !== $arm) continue;
             if ($car['dir'] !== self::DIR_IN) continue;
+            if (($car['lane'] ?? 0) !== $lane) continue;
             if ($car['position'] < self::SPAWN_MIN_GAP) {
                 return true;
             }
@@ -248,13 +296,14 @@ class TJunctionService
         return array_key_first(self::GOAL_DISTRIBUTION[$arm]);
     }
 
-    private function makeCar(int $id, string $arm, string $goal): array
+    private function makeCar(int $id, string $arm, string $goal, int $lane): array
     {
         return [
             'id'         => $id,
             'arm'        => $arm,
             'dir'        => self::DIR_IN,
             'position'   => 0,
+            'lane'       => $lane,
             'speed'      => 1,      // въезжаем уже двигаясь, не с нуля
             'goal'       => $goal,
             'inJunction' => false,
@@ -272,25 +321,43 @@ class TJunctionService
     {
         foreach ([self::ARM_W, self::ARM_E, self::ARM_S] as $arm) {
             if (empty($state['queues'][$arm])) continue;
-            if ($this->isEntryOccupied($state['machines'], $arm)) continue;
 
-            $car = array_shift($state['queues'][$arm]);
-            $state['machines'][$car['id']] = $car;
+            // На W/E две полосы — пытаемся слить сколько получится
+            // (но за один проход берём только машины разных полос).
+            // На S одна полоса — сливаем максимум одну.
+            $occupiedLanes = $this->occupiedEntryLanes($state['machines'], $arm);
+
+            $remaining = [];
+            foreach ($state['queues'][$arm] as $car) {
+                $lane = $car['lane'] ?? 0;
+                if (!isset($occupiedLanes[$lane])) {
+                    $state['machines'][$car['id']] = $car;
+                    $occupiedLanes[$lane] = true;
+                } else {
+                    $remaining[] = $car;
+                }
+            }
+            $state['queues'][$arm] = $remaining;
         }
         return $state;
     }
 
-    private function isEntryOccupied(array $machines, string $arm): bool
+    /**
+     * Возвращает map [lane => true] полос, на которых уже стоит
+     * машина в клетке 0 DIR_IN указанного плеча.
+     */
+    private function occupiedEntryLanes(array $machines, string $arm): array
     {
+        $occupied = [];
         foreach ($machines as $car) {
             if ($car['arm'] === $arm
                 && $car['dir'] === self::DIR_IN
                 && !$car['inJunction']
                 && $car['position'] === 0) {
-                return true;
+                $occupied[$car['lane'] ?? 0] = true;
             }
         }
-        return false;
+        return $occupied;
     }
 
     // ---------------------------------------------------------------
@@ -301,31 +368,44 @@ class TJunctionService
     {
         $grid = $this->buildGrid($state['machines']);
 
-        // Прогноз: какие клетки DIR_OUT[arm][0] будут СВОБОДНЫ после
-        // движения машин, уже стоящих на этих клетках. Машина в узле
-        // не должна ждать "лишний шаг" из-за того, что лидер на pos=0
-        // уже планирует уехать в этом же шаге.
+        // Прогноз: какие клетки DIR_OUT[arm][lane][0] будут СВОБОДНЫ
+        // после движения машин, уже стоящих на этих клетках. Машина в
+        // узле не должна ждать "лишний шаг" из-за того, что лидер на
+        // pos=0 уже планирует уехать в этом же шаге.
         $exitWillBeFree = [];
         foreach ([self::ARM_W, self::ARM_E, self::ARM_S] as $arm) {
-            $exitWillBeFree[$arm] = !isset($grid[$arm][self::DIR_OUT][0]);
+            $lanes = ($arm === self::ARM_S) ? [self::LANE_SINGLE] : [self::LANE_THROUGH, self::LANE_TURN];
+            foreach ($lanes as $lane) {
+                $exitWillBeFree[$arm][$lane] = !isset($grid[$arm][self::DIR_OUT][$lane][0]);
+            }
         }
         foreach ($state['machines'] as $car) {
             if ($car['inJunction']) continue;
             if ($car['dir'] !== self::DIR_OUT) continue;
             if ($car['position'] !== 0) continue;
-            // Машина на pos=0 DIR_OUT. Если она хоть как-то двинется
-            // в этот шаг (gap>0 и speed позволяет), клетка освободится.
-            // Точный gap считать дорого — простое условие: впереди
-            // нет машины на pos=1.
-            $arm = $car['arm'];
-            if (!isset($grid[$arm][self::DIR_OUT][1])) {
-                $exitWillBeFree[$arm] = true;
+            $arm  = $car['arm'];
+            $lane = $car['lane'] ?? 0;
+            if (!isset($grid[$arm][self::DIR_OUT][$lane][1])) {
+                $exitWillBeFree[$arm][$lane] = true;
             }
         }
 
+        // Перестроения планируем ДО продольного движения, на «пустом»
+        // grid'е — это даёт детерминированный порядок и исключает
+        // ложные конфликты с теми, кто только что съехал с полосы.
+        $laneChanges = $this->planLaneChanges($state['machines'], $grid, $state['phase'], $roadLength, $vMax);
+
+        // Применяем перестроения к локальной копии для дальнейшего
+        // продольного планирования. Сами snapshots обновляем в самом конце.
+        $machinesAfterLC = $state['machines'];
+        foreach ($laneChanges as $id => $newLane) {
+            $machinesAfterLC[$id]['lane'] = $newLane;
+        }
+        $grid = $this->buildGrid($machinesAfterLC);
+
         $intentions = [];
 
-        foreach ($state['machines'] as $car) {
+        foreach ($machinesAfterLC as $car) {
             if ($car['inJunction']) {
                 $intentions[$car['id']] = $this->planExitJunction($car, $grid, $exitWillBeFree);
                 continue;
@@ -337,9 +417,14 @@ class TJunctionService
             }
         }
 
-        $intentions = $this->resolveJunctionConflicts($intentions, $state['machines']);
-        $intentions = $this->resolveExitConflicts($intentions, $state['machines']);
+        $intentions = $this->resolveJunctionConflicts($intentions, $machinesAfterLC);
+        $intentions = $this->resolveExitConflicts($intentions, $machinesAfterLC);
 
+        // Сначала фиксируем перестроения (они уже применены к machinesAfterLC),
+        // потом применяем продольные интенты.
+        foreach ($laneChanges as $id => $newLane) {
+            $state['machines'][$id]['lane'] = $newLane;
+        }
         foreach ($intentions as $id => $intent) {
             $state['machines'][$id] = array_merge($state['machines'][$id], $intent);
         }
@@ -361,16 +446,108 @@ class TJunctionService
     }
 
     /**
-     * grid[arm][dir][position] = carId
+     * grid[arm][dir][lane][position] = carId
+     *
+     * Lane на S — всегда 0. На W/E — 0 (through) или 1 (turn).
      */
     private function buildGrid(array $machines): array
     {
         $grid = [];
         foreach ($machines as $car) {
             if ($car['inJunction']) continue;
-            $grid[$car['arm']][$car['dir']][$car['position']] = $car['id'];
+            $lane = $car['lane'] ?? 0;
+            $grid[$car['arm']][$car['dir']][$lane][$car['position']] = $car['id'];
         }
         return $grid;
+    }
+
+    // ---------------------------------------------------------------
+    // Перестроения (Chowdhury-Wolf-Schreckenberg 1997, асимметричный
+    // вариант с императивом маршрута).
+    //
+    // Каждая машина на DIR_IN W/E, чья текущая полоса не соответствует
+    // её goal, пытается сменить полосу. Базовые условия:
+    //   1) gap_ahead на текущей полосе < (нужный для движения),
+    //      ИЛИ полоса в принципе "не та" — в нашем случае ВСЕГДА да,
+    //      потому что мотив перестроения — маршрут, а не комфорт;
+    //   2) на целевой полосе впереди (gap_other_ahead) ≥ speed машины,
+    //   3) на целевой полосе сзади (gap_other_back) ≥ vMax (запас под
+    //      встречную, идущую быстрее);
+    //   4) клетка-мишень на целевой полосе свободна.
+    //
+    // Возле стоп-линии (≤ LANE_CHANGE_AGGRESSIVE_DIST) условие 3
+    // смягчается до gap_back ≥ 1, иначе машина зависнет на чужой полосе
+    // и придётся менять манёвр по факту полосы.
+    // ---------------------------------------------------------------
+
+    private function planLaneChanges(array $machines, array $grid, string $phase, int $roadLength, int $vMax): array
+    {
+        $changes = [];
+        $reservedTargets = []; // [arm][lane][pos] = true — чтобы две машины не нацелились в одну клетку
+
+        foreach ($machines as $car) {
+            if ($car['inJunction']) continue;
+            if ($car['dir'] !== self::DIR_IN) continue;
+            if ($car['arm'] === self::ARM_S) continue; // S однополосное
+
+            $currentLane = $car['lane'] ?? 0;
+            $desiredLane = $this->desiredLaneFor($car['goal']);
+            if ($currentLane === $desiredLane) continue;
+
+            $arm = $car['arm'];
+            $pos = $car['position'];
+            $distToStopLine = ($roadLength - 1) - $pos;
+            $aggressive = $distToStopLine <= self::LANE_CHANGE_AGGRESSIVE_DIST;
+
+            // Целевая клетка — та же позиция, но на соседней полосе.
+            // (Классический NaSch для двухполосной модели — перестроение
+            // без продольного смещения, продольное движение делается
+            // отдельным шагом.)
+            if (isset($grid[$arm][self::DIR_IN][$desiredLane][$pos])) continue;
+            if (isset($reservedTargets[$arm][$desiredLane][$pos])) continue;
+
+            // gap впереди на целевой полосе (от нашей позиции вперёд)
+            $gapAhead = $this->gapAheadOnLane($grid, $arm, self::DIR_IN, $desiredLane, $pos, $roadLength);
+            if ($gapAhead < $car['speed']) continue;
+
+            // gap позади на целевой полосе
+            $gapBack    = $this->gapBackOnLane($grid, $arm, self::DIR_IN, $desiredLane, $pos);
+            $minGapBack = $aggressive ? 1 : $vMax;
+            if ($gapBack < $minGapBack) continue;
+
+            $changes[$car['id']] = $desiredLane;
+            $reservedTargets[$arm][$desiredLane][$pos] = true;
+        }
+
+        return $changes;
+    }
+
+    /**
+     * Какая полоса соответствует маршруту на W/E.
+     * Goal на S → LANE_TURN, иначе (W↔E сквозное) → LANE_THROUGH.
+     */
+    private function desiredLaneFor(string $goal): int
+    {
+        return $goal === self::ARM_S ? self::LANE_TURN : self::LANE_THROUGH;
+    }
+
+    private function gapAheadOnLane(array $grid, string $arm, string $dir, int $lane, int $pos, int $roadLength): int
+    {
+        for ($i = 1; $i <= $roadLength; $i++) {
+            $check = $pos + $i;
+            if ($check >= $roadLength) return $roadLength;
+            if (isset($grid[$arm][$dir][$lane][$check])) return $i - 1;
+        }
+        return $roadLength;
+    }
+
+    private function gapBackOnLane(array $grid, string $arm, string $dir, int $lane, int $pos): int
+    {
+        for ($i = 1; $i <= $pos; $i++) {
+            $check = $pos - $i;
+            if (isset($grid[$arm][$dir][$lane][$check])) return $i - 1;
+        }
+        return PHP_INT_MAX;
     }
 
     // ---------------------------------------------------------------
@@ -425,10 +602,19 @@ class TJunctionService
         array $car, array $grid, string $phase, int $roadLength, int $vMax, float $p
     ): array {
         $pos            = $car['position'];
+        $lane           = $car['lane'] ?? 0;
         $distToStopLine = ($roadLength - 1) - $pos;  // 0 = вплотную к узлу
 
-        $allowed   = $this->isManoeuvreAllowed($car['arm'], $car['goal'], $phase);
-        $isTurning = $this->isTurning($car['arm'], $car['goal']);
+        // На W/E goal жёстко диктуется полосой при подходе к узлу:
+        //   LANE_THROUGH → прямой проезд (W↔E),
+        //   LANE_TURN    → поворот на S.
+        // Если машина не успела перестроиться к стоп-линии — goal
+        // корректируется по факту полосы (как реальная разметка).
+        // На S — goal остаётся как был (плечо однополосное).
+        $effectiveGoal = $this->effectiveGoalForLane($car['arm'], $lane, $car['goal']);
+
+        $allowed   = $this->isManoeuvreAllowed($car['arm'], $effectiveGoal, $phase);
+        $isTurning = $this->isTurning($car['arm'], $effectiveGoal);
 
         // Anticipation: плавно тормозим, если впереди узел требует
         // снижения скорости — поворот или красный для нашего манёвра.
@@ -440,7 +626,7 @@ class TJunctionService
         }
 
         // gap до лидера на той же полосе
-        $gapToLeader = $this->gapToLeaderInbound($grid, $car, $roadLength);
+        $gapToLeader = $this->gapAheadOnLane($grid, $car['arm'], self::DIR_IN, $lane, $pos, $roadLength);
 
         // gap до стоп-линии (если манёвр запрещён — стоп-линия в позиции roadLength-1)
         $gapEffective = $gapToLeader;
@@ -459,7 +645,8 @@ class TJunctionService
 
         $newPos = $pos + $v;
 
-        // Машина пересекает стоп-линию — въезжает в узел
+        // Машина пересекает стоп-линию — въезжает в узел.
+        // Goal в момент въезда фиксируется по полосе.
         if ($newPos > $roadLength - 1 && $allowed) {
             return [
                 'position'   => 0,
@@ -467,7 +654,8 @@ class TJunctionService
                 'inJunction' => true,
                 'arm'        => $car['arm'],
                 'dir'        => $car['dir'],
-                'goal'       => $car['goal'],
+                'lane'       => $lane,
+                'goal'       => $effectiveGoal,
                 'waitedAt'   => null,
                 'accelTimer' => $accelTimer,
                 'justEntered'=> false,
@@ -478,6 +666,9 @@ class TJunctionService
         return [
             'position'   => min($newPos, $roadLength - 1),
             'speed'      => $v,
+            'lane'       => $lane,
+            'goal'       => $effectiveGoal,  // фиксируем goal даже не пересекая стоп-линию,
+            // чтобы он соответствовал текущей полосе
             'inJunction' => false,
             'accelTimer' => $accelTimer,
             'justEntered'=> false,
@@ -485,28 +676,21 @@ class TJunctionService
     }
 
     /**
-     * Gap до ближайшей машины впереди на той же полосе.
-     * Считаем сразу до стоп-линии: клетки за roadLength-1 — это узел, его трактуем
-     * отдельно через junctionBlocked.
+     * Эффективный goal по полосе на W/E. На S — без изменений.
+     *
+     * Полоса жёстко диктует манёвр:
+     *   LANE_THROUGH (правая) → прямо (W→E или E→W),
+     *   LANE_TURN    (левая)  → на S.
      */
-    private function gapToLeaderInbound(array $grid, array $car, int $roadLength): int
+    private function effectiveGoalForLane(string $arm, int $lane, string $goal): string
     {
-        $arm = $car['arm'];
-        $pos = $car['position'];
+        if ($arm === self::ARM_S) return $goal;
 
-        for ($i = 1; $i <= $roadLength; $i++) {
-            $check = $pos + $i;
-            if ($check >= $roadLength) {
-                // Дошли до конца плеча — впереди узел.
-                // Возвращаем "большой" gap, чтобы NaSch не ограничивал. Реальное
-                // ограничение по узлу применяется отдельно через gapEffective.
-                return $roadLength;
-            }
-            if (isset($grid[$arm][self::DIR_IN][$check])) {
-                return $i - 1;
-            }
+        if ($lane === self::LANE_TURN) {
+            return self::ARM_S;
         }
-        return $roadLength;
+        // LANE_THROUGH
+        return $arm === self::ARM_W ? self::ARM_E : self::ARM_W;
     }
 
     // ---------------------------------------------------------------
@@ -515,18 +699,11 @@ class TJunctionService
 
     private function planOutbound(array $car, array $grid, int $roadLength, int $vMax, float $p): array
     {
-        $pos = $car['position'];
-        $arm = $car['arm'];
+        $pos  = $car['position'];
+        $arm  = $car['arm'];
+        $lane = $car['lane'] ?? 0;
 
-        $gap = $roadLength;
-        for ($i = 1; $i <= $roadLength; $i++) {
-            $check = $pos + $i;
-            if ($check >= $roadLength) break;
-            if (isset($grid[$arm][self::DIR_OUT][$check])) {
-                $gap = $i - 1;
-                break;
-            }
-        }
+        $gap = $this->gapAheadOnLane($grid, $arm, self::DIR_OUT, $lane, $pos, $roadLength);
 
         // Свежевышедшая из узла машина (justEntered) пропускает VDR на первом шаге
         $skipVDR = !empty($car['justEntered']);
@@ -549,13 +726,19 @@ class TJunctionService
 
     private function planExitJunction(array $car, array $grid, array $exitWillBeFree = []): array
     {
-        $targetArm = $car['goal'];
-        $willBeFree = $exitWillBeFree[$targetArm] ?? !isset($grid[$targetArm][self::DIR_OUT][0]);
+        $targetArm  = $car['goal'];
+        // Выезжающая машина встаёт в правую полосу (правостороннее
+        // движение). На S — единственная полоса.
+        $targetLane = ($targetArm === self::ARM_S) ? self::LANE_SINGLE : self::LANE_THROUGH;
+
+        $willBeFree = $exitWillBeFree[$targetArm][$targetLane]
+            ?? !isset($grid[$targetArm][self::DIR_OUT][$targetLane][0]);
 
         if ($willBeFree) {
             return [
                 'arm'         => $targetArm,
                 'dir'         => self::DIR_OUT,
+                'lane'        => $targetLane,
                 'position'    => 0,
                 'speed'       => 1,
                 'inJunction'  => false,
@@ -568,6 +751,7 @@ class TJunctionService
             'inJunction'       => true,
             'arm'              => $car['arm'],
             'dir'              => $car['dir'],
+            'lane'             => $car['lane'] ?? 0,
             'goal'             => $car['goal'],
             'speed'            => 0,
             'junctionProgress' => $car['junctionProgress'] ?? 0.5,
@@ -660,54 +844,56 @@ class TJunctionService
 
     private function resolveExitConflicts(array $intentions, array $machines): array
     {
-        // Группируем намерения по целевой клетке (arm, dir, position).
+        // Группируем намерения по целевой клетке (arm, lane, pos=0 на DIR_OUT).
         // Интерес — только машины, которые в этом шаге окажутся
         // на DIR_OUT pos=0 (выход из узла или новые машины).
         $targets = [];
         foreach ($intentions as $id => $intent) {
-            $arm = $intent['arm'] ?? $machines[$id]['arm'];
-            $dir = $intent['dir'] ?? $machines[$id]['dir'];
-            $pos = $intent['position'] ?? $machines[$id]['position'];
-            $inJ = $intent['inJunction'] ?? $machines[$id]['inJunction'];
+            $arm  = $intent['arm']  ?? $machines[$id]['arm'];
+            $dir  = $intent['dir']  ?? $machines[$id]['dir'];
+            $pos  = $intent['position']   ?? $machines[$id]['position'];
+            $lane = $intent['lane']       ?? ($machines[$id]['lane'] ?? 0);
+            $inJ  = $intent['inJunction'] ?? $machines[$id]['inJunction'];
 
             if (!$inJ && $dir === self::DIR_OUT && $pos === 0) {
-                $targets[$arm][] = $id;
+                $targets[$arm][$lane][] = $id;
             }
         }
 
-        foreach ($targets as $arm => $ids) {
-            if (count($ids) <= 1) continue;
+        foreach ($targets as $arm => $byLane) {
+            foreach ($byLane as $lane => $ids) {
+                if (count($ids) <= 1) continue;
 
-            // Приоритет — машина, которая УЖЕ была в узле (она дольше ждёт).
-            // Если такая одна — она проезжает, остальные блокируются.
-            // Если все одинаково (все из узла или все из очереди) — берём
-            // меньший id для детерминированности.
-            usort($ids, function ($a, $b) use ($machines) {
-                $aInJ = $machines[$a]['inJunction'] ? 0 : 1;
-                $bInJ = $machines[$b]['inJunction'] ? 0 : 1;
-                if ($aInJ !== $bInJ) return $aInJ <=> $bInJ;
-                return $a <=> $b;
-            });
+                // Приоритет — машина, которая УЖЕ была в узле (она дольше ждёт).
+                usort($ids, function ($a, $b) use ($machines) {
+                    $aInJ = $machines[$a]['inJunction'] ? 0 : 1;
+                    $bInJ = $machines[$b]['inJunction'] ? 0 : 1;
+                    if ($aInJ !== $bInJ) return $aInJ <=> $bInJ;
+                    return $a <=> $b;
+                });
 
-            $winner = array_shift($ids);
-            foreach ($ids as $id) {
-                $car = $machines[$id];
-                if ($car['inJunction']) {
-                    $intentions[$id] = [
-                        'inJunction'       => true,
-                        'arm'              => $car['arm'],
-                        'dir'              => $car['dir'],
-                        'goal'             => $car['goal'],
-                        'speed'            => 0,
-                        'junctionProgress' => $car['junctionProgress'] ?? 0.0,
-                    ];
-                } else {
-                    // Стоит на стоп-линии своего DIR_IN
-                    $intentions[$id] = [
-                        'position'   => $car['position'],
-                        'speed'      => 0,
-                        'inJunction' => false,
-                    ];
+                $winner = array_shift($ids);
+                foreach ($ids as $id) {
+                    $car = $machines[$id];
+                    if ($car['inJunction']) {
+                        $intentions[$id] = [
+                            'inJunction'       => true,
+                            'arm'              => $car['arm'],
+                            'dir'              => $car['dir'],
+                            'lane'             => $car['lane'] ?? 0,
+                            'goal'             => $car['goal'],
+                            'speed'            => 0,
+                            'junctionProgress' => $car['junctionProgress'] ?? 0.0,
+                        ];
+                    } else {
+                        // Стоит на стоп-линии своего DIR_IN
+                        $intentions[$id] = [
+                            'position'   => $car['position'],
+                            'lane'       => $car['lane'] ?? 0,
+                            'speed'      => 0,
+                            'inJunction' => false,
+                        ];
+                    }
                 }
             }
         }
